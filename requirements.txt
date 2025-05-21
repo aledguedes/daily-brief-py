@@ -1,0 +1,15 @@
+sqlalchemy
+psycopg2-binary
+requests
+deep-translator
+playwright
+praw
+jsonschema
+tenacity
+python-dotenv
+fastapi
+uvicorn
+pyjwt
+google-search-results
+newsapi-python
+unsplash-python
