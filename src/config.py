@@ -47,7 +47,7 @@ class Config:
     # Configurações de Reddit (se usadas no seu script)
     REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
     REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
-    REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "daily-brief-bot/1.0")
+    REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT")
 
     # Configuração de JWT (para o servidor Python verificar tokens recebidos)
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
