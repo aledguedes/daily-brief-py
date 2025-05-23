@@ -2,12 +2,13 @@
 import requests
 import logging
 import json
+import re
 from src.config import Config
 from src.auth import Auth
 import jsonschema
 from jsonschema import ValidationError
 from tenacity import retry, stop_after_attempt, wait_fixed
-from datetime import datetime, timezone # Importar timezone para logs
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +43,12 @@ post_schema = {
         },
         "content": { # Map<String, String> content // PT, EN, ES
             "type": "object",
-            "required": ["PT", "EN", "ES"],
             "properties": {
                 "PT": {"type": "string"},
                 "EN": {"type": "string"},
                 "ES": {"type": "string"}
             },
-            "additionalProperties": False,
-            "minProperties": 3,
-            "maxProperties": 3
+            "required": ["PT", "EN", "ES"]
         },
         "image": {"type": ["string", "null"]}, # String ou null
         "author": {"type": "string"},
@@ -58,15 +56,12 @@ post_schema = {
         "category": {"type": ["string", "null"]}, # String ou null
         "metaDescription": { # Map<String, String> metaDescription // SEO
             "type": "object",
-            "required": ["PT", "EN", "ES"],
             "properties": {
                 "PT": {"type": "string"},
                 "EN": {"type": "string"},
                 "ES": {"type": "string"}
             },
-            "additionalProperties": False,
-            "minProperties": 3,
-            "maxProperties": 3
+            "required": ["PT", "EN", "ES"]
         },
         "affiliateLinks": { # Map<String, String> affiliateLinks
             "type": "object",
@@ -128,6 +123,7 @@ def get_existing_posts(headers):
         logger.error(f"Erro inesperado ao buscar posts existentes em {url}: {str(e)}", exc_info=True)
         return []
 
+
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def send_post(post_data, headers):
     """
@@ -175,20 +171,26 @@ def send_logs_to_backend(log_data, headers=None):
         return
 
     logger.info(f"Enviando log para o backend em: {url}")
-    logger.debug(f"Dados de log a enviar: {json.dumps(log_data, ensure_ascii=False)}")
+    
+    # Criar uma cópia mutável para manipulação
+    log_data_to_send = log_data.copy()
+
+    # CORREÇÃO: Garantir que o timestamp esteja no formato ISO 8601 com 'Z' para UTC
+    # Isso é crucial para que o Spring Boot deserialize corretamente java.time.Instant
+    if "timestamp" in log_data_to_send and isinstance(log_data_to_send["timestamp"], datetime):
+        log_data_to_send["timestamp"] = log_data_to_send["timestamp"].isoformat(timespec='microseconds') + 'Z'
+    elif "timestamp" in log_data_to_send and isinstance(log_data_to_send["timestamp"], str):
+         # Se já for string, garantir que termina com 'Z' se for UTC
+         # Usa re.search para verificar se já tem um offset ou 'Z'
+         if not log_data_to_send["timestamp"].endswith('Z') and not re.search(r'[+-]\d{2}:\d{2}$', log_data_to_send["timestamp"]):
+              logger.warning(f"Timestamp '{log_data_to_send['timestamp']}' não tem offset ou Z. Adicionando Z.")
+              log_data_to_send["timestamp"] = log_data_to_send["timestamp"] + 'Z'
+
+    # Agora, use a cópia convertida para o log e para o envio
+    logger.debug(f"Dados de log a enviar (JSON serializável): {json.dumps(log_data_to_send, ensure_ascii=False)}")
+
     try:
-        # CORREÇÃO: Garantir que o timestamp esteja no formato ISO 8601 com 'Z' para UTC
-        # Isso é crucial para que o Spring Boot deserialize corretamente java.time.Instant
-        if "timestamp" in log_data and isinstance(log_data["timestamp"], datetime):
-            log_data["timestamp"] = log_data["timestamp"].isoformat(timespec='microseconds') + 'Z'
-        elif "timestamp" in log_data and isinstance(log_data["timestamp"], str):
-             # Se já for string, garantir que termina com 'Z' se for UTC
-             if not log_data["timestamp"].endswith('Z') and not re.search(r'[+-]\d{2}:\d{2}$', log_data["timestamp"]):
-                  logger.warning(f"Timestamp '{log_data['timestamp']}' não tem offset ou Z. Adicionando Z.")
-                  log_data["timestamp"] = log_data["timestamp"] + 'Z'
-
-
-        response = requests.post(url, json=log_data, headers=headers, timeout=Config.REQUEST_TIMEOUT)
+        response = requests.post(url, json=log_data_to_send, headers=headers, timeout=Config.REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.info(f"Log enviado com sucesso para {url}. Status: {response.status_code}")
         return response

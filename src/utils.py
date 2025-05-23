@@ -3,6 +3,7 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta, timezone # Importar timezone
+import uuid # Importar uuid para save_payload_to_file
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,3 @@ def save_payload_to_file(payload_data, theme, content_type):
     except Exception as e:
         logger.error(f"Erro ao salvar payload em {filename}: {str(e)}", exc_info=True)
         return None
-
-# Você pode adicionar outras funções utilitárias aqui, como:
-# def translate_text(text, target_language): ... (se você precisar de tradução externa ao Gemini)

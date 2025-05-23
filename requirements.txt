@@ -12,4 +12,5 @@ uvicorn
 pyjwt
 google-search-results
 newsapi-python
-unsplash-python
+python-unsplash
+google-generativeai
