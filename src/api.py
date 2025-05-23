@@ -2,7 +2,7 @@
 import requests
 import logging
 import json
-import re
+import re # Importado para uso no timestamp
 from src.config import Config
 from src.auth import Auth
 import jsonschema
@@ -74,8 +74,47 @@ post_schema = {
         "publishedAt": {"type": ["string", "null"], "format": "date-time"}, # String (ISO 8601) ou null
         "readTime": {"type": ["string", "null"]} # String ou null
     },
-    "additionalProperties": False # Não permite propriedades adicionais não definidas no esquema
+    "additionalProperties": False # Não permite propriedades adicionais não definidas no esquema principal
 }
+
+# --- NOVA LÓGICA DE LIMPEZA DE PAYLOAD ---
+# Lista dos campos que o Spring Boot PostRequestDTO espera.
+# MANTENHA ESTA LISTA ATUALIZADA CONFORME SEU DTO JAVA!
+EXPECTED_POST_FIELDS = [
+    "title",
+    "excerpt",
+    "content",
+    "image",
+    "author",
+    "tags",
+    "category",
+    "metaDescription",
+    "affiliateLinks",
+    "status",
+    "publishedAt",
+    "readTime"
+]
+
+def clean_post_payload(post_data: dict) -> dict:
+    """
+    Remove campos do payload do post que não são esperados pelo PostRequestDTO do Spring Boot.
+    """
+    cleaned_data = {}
+    for field in EXPECTED_POST_FIELDS:
+        if field in post_data:
+            cleaned_data[field] = post_data[field]
+    
+    # Adicionalmente, alguns campos aninhados podem precisar de limpeza se contiverem extras
+    # Por exemplo, se 'title', 'excerpt', 'content', 'metaDescription' puderem ter chaves extras.
+    # No seu schema atual, eles já têm 'additionalProperties': False, o que é bom.
+    # Se em algum momento o Gemini começar a adicionar chaves extras DENTRO de title.PT, etc.,
+    # você precisaria de uma lógica mais profunda aqui. Por enquanto, a remoção de campos de nível superior é suficiente.
+
+    logger.debug(f"Payload gerado (completo): {json.dumps(post_data, ensure_ascii=False, indent=2)}") # Loga o payload original gerado
+    logger.debug(f"Payload limpo (para envio): {json.dumps(cleaned_data, ensure_ascii=False, indent=2)}")
+    return cleaned_data
+
+# --- FIM DA NOVA LÓGICA DE LIMPEZA ---
 
 
 def get_existing_posts(headers):
@@ -131,20 +170,23 @@ def send_post(post_data, headers):
     Implementado retry para aumentar a robustez.
     """
     url = Config.API_URL
-    logger.info(f"Enviando post para o backend em: {url}")
-    logger.debug(f"Payload de envio: {json.dumps(post_data, ensure_ascii=False, indent=2)}")
+    logger.info(f"Iniciando envio de post para o backend em: {url}")
+    
+    # AQUI: Chame a função de limpeza antes de validar e enviar
+    cleaned_post_data = clean_post_payload(post_data)
+
     try:
-        validate_post(post_data)
+        validate_post(cleaned_post_data) # Valida o payload já limpo
         logger.debug("Payload validado com sucesso contra o esquema.")
 
-        response = requests.post(url, json=post_data, headers=headers, timeout=Config.REQUEST_TIMEOUT)
+        response = requests.post(url, json=cleaned_post_data, headers=headers, timeout=Config.REQUEST_TIMEOUT) # Envia o payload limpo
         response.raise_for_status()
 
         logger.info(f"Post enviado com sucesso para {url}. Status: {response.status_code}")
         return response
 
     except ValidationError as e:
-        logger.error(f"Erro de validação do esquema do post antes de enviar: {str(e)}. Payload: {json.dumps(post_data, ensure_ascii=False)}", exc_info=True)
+        logger.error(f"Erro de validação do esquema do post antes de enviar: {str(e)}. Payload: {json.dumps(cleaned_post_data, ensure_ascii=False)}", exc_info=True)
         raise ValueError(f"Erro de validação do esquema do post: {e.message}") from e
     except requests.exceptions.Timeout:
         logger.error(f"Timeout ao enviar post para {url}. Tentando novamente...", exc_info=True)
@@ -178,13 +220,15 @@ def send_logs_to_backend(log_data, headers=None):
     # CORREÇÃO: Garantir que o timestamp esteja no formato ISO 8601 com 'Z' para UTC
     # Isso é crucial para que o Spring Boot deserialize corretamente java.time.Instant
     if "timestamp" in log_data_to_send and isinstance(log_data_to_send["timestamp"], datetime):
+        # Formatando para 'YYYY-MM-DDTHH:MM:SS.ffffffZ' para java.time.Instant
         log_data_to_send["timestamp"] = log_data_to_send["timestamp"].isoformat(timespec='microseconds') + 'Z'
     elif "timestamp" in log_data_to_send and isinstance(log_data_to_send["timestamp"], str):
          # Se já for string, garantir que termina com 'Z' se for UTC
-         # Usa re.search para verificar se já tem um offset ou 'Z'
-         if not log_data_to_send["timestamp"].endswith('Z') and not re.search(r'[+-]\d{2}:\d{2}$', log_data_to_send["timestamp"]):
-              logger.warning(f"Timestamp '{log_data_to_send['timestamp']}' não tem offset ou Z. Adicionando Z.")
-              log_data_to_send["timestamp"] = log_data_to_send["timestamp"] + 'Z'
+         # Remove qualquer offset ou 'Z' existente e adiciona 'Z' no final para padronizar
+         # Regex para remover offset (+HH:MM) ou Z
+         clean_timestamp = re.sub(r'[+-]\d{2}:\d{2}$|Z$', '', log_data_to_send["timestamp"])
+         logger.warning(f"Timestamp '{log_data_to_send['timestamp']}' já é string. Normalizando para formato Z: '{clean_timestamp}Z'")
+         log_data_to_send["timestamp"] = clean_timestamp + 'Z'
 
     # Agora, use a cópia convertida para o log e para o envio
     logger.debug(f"Dados de log a enviar (JSON serializável): {json.dumps(log_data_to_send, ensure_ascii=False)}")
