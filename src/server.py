@@ -1,6 +1,6 @@
 # src/server.py
 
-from fastapi import FastAPI, HTTPException, Depends, Query, Request
+from fastapi import FastAPI, HTTPException, Depends, Query, Request, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
 import logging
@@ -8,14 +8,15 @@ import jwt
 import base64
 import os
 import asyncio
-import requests
+import requests # Necessário para send_logs_to_backend e tratamento de exceções
 from datetime import datetime, timezone
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 import json
 from typing import Optional
+import uuid # Importado para gerar report_id
 
-from src.main import main as run_automation # Importar a função main
+from src.main import main as run_automation # Importar a função main do src.main
 from src.config import Config # Importar Config
 from src.database import get_db # Importar get_db
 from src.models import AutomationRequest # Importar AutomationRequest model
@@ -62,7 +63,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
             try:
                 log_data = {
                     "action": f"Erro interno ao verificar token: {str(e)}",
-                    "timestamp": datetime.now(timezone.utc).isoformat(timespec='microseconds') + 'Z',
+                    "timestamp": datetime.now(timezone.utc), # Usar datetime object aqui
                     "level": "ERROR"
                 }
                 send_logs_to_backend(log_data)
@@ -92,7 +93,7 @@ async def trigger_by_id(
                 try:
                     log_data = {
                         "action": f"Falha ao executar automação para ID {id}: Registro não encontrado.",
-                        "timestamp": datetime.now(timezone.utc).isoformat(timespec='microseconds') + 'Z',
+                        "timestamp": datetime.now(timezone.utc), # Usar datetime object aqui
                         "level": "WARNING"
                     }
                     send_logs_to_backend(log_data)
@@ -105,8 +106,7 @@ async def trigger_by_id(
         theme = request_entry.theme
         logger.info(f"Parâmetros do DB para ID {id}: output_format='{output_format}', theme='{theme}'")
 
-        # Chama a função principal de automação DIRETAMENTE
-        # Passa os parâmetros lidos do DB e os headers de autenticação
+        # Chama a função principal de automação (src.main.main)
         # O token original é passado para que run_automation possa usá-lo em chamadas para o Spring Boot
         output_report = await run_automation(
             output_format=output_format,
@@ -131,7 +131,7 @@ async def trigger_by_id(
             try:
                 log_data = {
                     "action": f"Falha na execução da automação para ID {id}. Erro: {str(http_exc.detail)}",
-                    "timestamp": datetime.now(timezone.utc).isoformat(timespec='microseconds') + 'Z',
+                    "timestamp": datetime.now(timezone.utc), # Usar datetime object aqui
                     "level": "ERROR"
                 }
                 send_logs_to_backend(log_data)
@@ -144,7 +144,7 @@ async def trigger_by_id(
             try:
                 log_data = {
                     "action": f"Erro inesperado na execução da automação para ID {id}. Erro: {str(e)}",
-                    "timestamp": datetime.now(timezone.utc).isoformat(timespec='microseconds') + 'Z',
+                    "timestamp": datetime.now(timezone.utc), # Usar datetime object aqui
                     "level": "CRITICAL"
                 }
                 send_logs_to_backend(log_data)
@@ -154,64 +154,28 @@ async def trigger_by_id(
 
 
 # Endpoint para acionar a automação via corpo da requisição (POST com JSON)
-# MANTIDO como uma opção, mas o fluxo principal do Spring Boot será via /trigger-by-id
 @app.post("/trigger")
 async def trigger_automation_post(
-    request: Request,
+    request_data: TriggerRequest, # Usa o modelo Pydantic para validação automática
     user: dict = Depends(verify_token)
 ):
     """
     Aciona a automação de geração de posts com base em parâmetros fornecidos no corpo da requisição JSON.
     Requer um token JWT válido.
-    Lida com possível BOM no corpo da requisição através de remoção explícita.
     """
     logger.info(f"Endpoint POST /trigger acionado pelo usuário: {user['payload'].get('sub', 'Desconhecido')}")
 
-    decoded_body = None
-    raw_body = None
-    request_data = None
+    output_format = request_data.output_format
+    theme = request_data.theme
 
     try:
-        raw_body = await request.body()
-        logger.debug(f"Corpo da requisição raw (bytes): {raw_body}")
+        logger.info(f"Parâmetros recebidos: output_format='{output_format}', theme='{theme}'")
 
-        bom_bytes = b'\xef\xbb\xbf'
-        if raw_body.startswith(bom_bytes):
-            logger.warning("BOM UTF-8 detectado no início do corpo da requisição. Removendo...")
-            processed_body = raw_body[len(bom_bytes):]
-            logger.debug(f"Corpo após remover BOM: {processed_body}")
-        else:
-            processed_body = raw_body
-
-        try:
-            decoded_body = processed_body.decode('utf-8')
-            logger.debug(f"Corpo da requisição decodificado (utf-8 após processar BOM): '{decoded_body}'")
-        except Exception as e_decode:
-             logger.error(f"Falha ao decodificar corpo após processar BOM: {str(e_decode)}. Não foi possível decodificar.", exc_info=True)
-             if Config.LOGS_API_URL:
-                try:
-                    log_data = {
-                        "action": f"Falha ao decodificar corpo da requisição POST /trigger. Erro: {str(e_decode)}",
-                        "timestamp": datetime.now(timezone.utc).isoformat(timespec='microseconds') + 'Z',
-                        "level": "ERROR",
-                        "raw_body_start": raw_body[:100].hex() if raw_body else "N/A"
-                    }
-                    send_logs_to_backend(log_data)
-                except Exception as log_err:
-                    logger.error(f"Erro ao enviar log de decodificação para o backend: {str(log_err)}", exc_info=True)
-             raise HTTPException(status_code=400, detail="Não foi possível decodificar o corpo da requisição.")
-
-        request_data_dict = json.loads(decoded_body)
-        logger.info(f"Parâmetros recebidos (após decodificação e parsing): {request_data_dict}")
-
-        request_data = TriggerRequest(**request_data_dict)
-        logger.debug("Validação Pydantic do corpo da requisição bem-sucedida.")
-
-        # Chama a função principal de automação DIRETAMENTE
+        # Chama a função principal de automação (src.main.main)
         # Reutiliza o token recebido para chamadas internas da automação
         output_report = await run_automation(
-            output_format=request_data.output_format,
-            theme=request_data.theme,
+            output_format=output_format,
+            theme=theme,
             auth_headers={"Authorization": f"Bearer {user['token']}"} # Passa o token recebido
         )
 
@@ -221,34 +185,19 @@ async def trigger_automation_post(
         response_content = {
             "message": "Automação executada com sucesso!",
             "report_summary": output_report,
-            "parameters": {"output_format": request_data.output_format, "theme": request_data.theme}
+            "parameters": {"output_format": output_format, "theme": theme}
         }
         logger.info("Retornando resposta de sucesso para POST /trigger.")
         return JSONResponse(content=response_content, media_type="application/json; charset=utf-8")
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Erro ao parsear JSON do corpo da requisição POST /trigger: {str(e)}. Corpo decodificado: '{decoded_body}'", exc_info=True)
-        if Config.LOGS_API_URL:
-            try:
-                log_data = {
-                    "action": f"Falha ao parsear JSON do corpo da requisição POST /trigger. Erro: {str(e)}",
-                    "timestamp": datetime.now(timezone.utc).isoformat(timespec='microseconds') + 'Z',
-                    "level": "ERROR",
-                    "decoded_body_start": decoded_body[:500] if decoded_body else "N/A"
-                }
-                send_logs_to_backend(log_data)
-            except Exception as log_err:
-                logger.error(f"Erro ao enviar log de JSONDecodeError para o backend: {str(log_err)}", exc_info=True)
-        raise HTTPException(status_code=400, detail=f"Corpo da requisição inválido: Não é um JSON válido. {str(e)}")
     except ValidationError as e:
-        logger.error(f"Erro de validação Pydantic para POST /trigger: {str(e)}. Corpo decodificado: '{decoded_body}'", exc_info=True)
+        logger.error(f"Erro de validação Pydantic para POST /trigger: {str(e)}", exc_info=True)
         if Config.LOGS_API_URL:
             try:
                 log_data = {
                     "action": f"Falha de validação Pydantic para POST /trigger. Erro: {str(e)}",
-                    "timestamp": datetime.now(timezone.utc).isoformat(timespec='microseconds') + 'Z',
-                    "level": "ERROR",
-                    "decoded_body_start": decoded_body[:500] if decoded_body else "N/A"
+                    "timestamp": datetime.now(timezone.utc), # Usar datetime object aqui
+                    "level": "ERROR"
                 }
                 send_logs_to_backend(log_data)
             except Exception as log_err:
@@ -262,7 +211,7 @@ async def trigger_automation_post(
             try:
                 log_data = {
                     "action": f"Falha na execução da automação POST /trigger. Erro: {str(http_exc.detail)}",
-                    "timestamp": datetime.now(timezone.utc).isoformat(timespec='microseconds') + 'Z',
+                    "timestamp": datetime.now(timezone.utc), # Usar datetime object aqui
                     "level": "ERROR"
                 }
                 send_logs_to_backend(log_data)
@@ -275,7 +224,7 @@ async def trigger_automation_post(
             try:
                 log_data = {
                     "action": f"Erro inesperado na execução da automação POST /trigger. Erro: {str(e)}",
-                    "timestamp": datetime.now(timezone.utc).isoformat(timespec='microseconds') + 'Z',
+                    "timestamp": datetime.now(timezone.utc), # Usar datetime object aqui
                     "level": "CRITICAL"
                 }
                 send_logs_to_backend(log_data)

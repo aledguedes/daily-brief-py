@@ -1,8 +1,8 @@
-# src/api.py
+
 import requests
 import logging
 import json
-import re # Importado para uso no timestamp
+import re
 from src.config import Config
 from src.auth import Auth
 import jsonschema
@@ -77,7 +77,7 @@ post_schema = {
     "additionalProperties": False # Não permite propriedades adicionais não definidas no esquema principal
 }
 
-# --- NOVA LÓGICA DE LIMPEZA DE PAYLOAD ---
+# --- LÓGICA DE LIMPEZA DE PAYLOAD ---
 # Lista dos campos que o Spring Boot PostRequestDTO espera.
 # MANTENHA ESTA LISTA ATUALIZADA CONFORME SEU DTO JAVA!
 EXPECTED_POST_FIELDS = [
@@ -104,17 +104,11 @@ def clean_post_payload(post_data: dict) -> dict:
         if field in post_data:
             cleaned_data[field] = post_data[field]
     
-    # Adicionalmente, alguns campos aninhados podem precisar de limpeza se contiverem extras
-    # Por exemplo, se 'title', 'excerpt', 'content', 'metaDescription' puderem ter chaves extras.
-    # No seu schema atual, eles já têm 'additionalProperties': False, o que é bom.
-    # Se em algum momento o Gemini começar a adicionar chaves extras DENTRO de title.PT, etc.,
-    # você precisaria de uma lógica mais profunda aqui. Por enquanto, a remoção de campos de nível superior é suficiente.
-
     logger.debug(f"Payload gerado (completo): {json.dumps(post_data, ensure_ascii=False, indent=2)}") # Loga o payload original gerado
     logger.debug(f"Payload limpo (para envio): {json.dumps(cleaned_data, ensure_ascii=False, indent=2)}")
     return cleaned_data
 
-# --- FIM DA NOVA LÓGICA DE LIMPEZA ---
+# --- FIM DA LÓGICA DE LIMPEZA ---
 
 
 def get_existing_posts(headers):
