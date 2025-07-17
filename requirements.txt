@@ -14,3 +14,7 @@ google-search-results
 newsapi-python
 python-unsplash
 google-generativeai
+pytrends
+tweepy
+aiohttp
+asyncpraw

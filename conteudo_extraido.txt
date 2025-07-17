@@ -1,0 +1,610 @@
+
+=== URL: https://www.robertodiasduarte.com.br/o-futuro-dos-programadores-na-era-da-inteligencia-artificial/ ===
+AI News
+por
+OpenAI O3 Mini
+5 de abril de 2025
+18:47
+O Futuro dos Programadores na Era da Inteligência Artificial
+Índice
+Toggle
+O Impacto da Inteligência Artificial na Profissão de Programador: Realidade e Perspectivas
+Introdução
+A Inteligência Artificial como Ferramenta Auxiliar, Não Substituta
+Qualidade do Código Gerado por IA: Uma Análise Cautelosa
+O Impacto Real da IA nas Práticas de Desenvolvimento e Empregos
+Adoção de IA no fluxo de trabalho de desenvolvedores
+Preocupações e riscos percebidos por desenvolvedores juniores
+Impacto da IA no mercado de trabalho de desenvolvedores
+Adaptação e foco em habilidades humanas únicas
+Conclusão
+Referências
+O Impacto da Inteligência Artificial na Profissão de Programador: Realidade e Perspectivas
+Introdução
+Nos últimos anos, a inteligência artificial (IA) tem sido um tema central no universo da tecnologia, trazendo transformações que impactam diversas áreas, especialmente a programação. Essa tecnologia é frequentemente vista tanto como uma potencial aliada quanto como uma ameaça à atuação dos profissionais, o que gera debates intensos sobre seu real papel. A discussão acerca dos limites e possibilidades da IA na codificação levanta questionamentos sobre substituição de funções e a valorização das habilidades humanas.
+O presente artigo propõe uma análise detalhada de como a IA está remodelando a profissão de programador, com ênfase em seu papel de ferramenta auxiliar. Serão discutidos aspectos como a automação de tarefas repetitivas, a qualidade do código gerado e os impactos nas práticas de desenvolvimento e no mercado de trabalho. A abordagem pretende ser didática e fundamentada, apresentando estudos recentes, opiniões de especialistas e dados que ajudam a compreender a complexidade dessa transformação.
+Ao longo do texto, cada seção abordará um tópico específico de forma estruturada, permitindo uma compreensão progressiva do tema. Serão analisadas as contribuições da IA como apoio às atividades diárias dos desenvolvedores, os desafios na manutenção da qualidade do código e os riscos percebidos, sobretudo, pelos profissionais em início de carreira. Dessa forma, o artigo busca oferecer um panorama equilibrado sobre as reais perspectivas e limitações do uso da IA na programação.
+A Inteligência Artificial como Ferramenta Auxiliar, Não Substituta
+A IA, impulsionada por modelos avançados como o GPT-4 e o GitHub Copilot, vem sendo utilizada para automatizar tarefas repetitivas, aliviando os profissionais de atividades corriqueiras que não exigem tomada de decisões complexas. Apesar dessa capacidade de aceleração de processos, a inteligência artificial ainda não possui a criatividade e o julgamento crítico necessários para lidar com problemas complexos de design de sistemas e arquitetura de software. Líderes da indústria, como Satya Nadella e Jeff Dean, enfatizam que a tecnologia deve ser encarada como um complemento às habilidades humanas, e não como um substituto.
+Nesse contexto, a IA se mostra mais eficaz em tarefas específicas do que na execução de projetos inteiros, evidenciando a importância de uma colaboração estreita entre humanos e máquinas. Habilidades fundamentais, como o pensamento crítico e o design de sistemas, permanecem essenciais para a criação e manutenção de softwares robustos. A complementaridade entre o potencial automatizador da IA e a expertise dos programadores foi ressaltada por vários especialistas, enfatizando que o sucesso dependerá da sinergia entre essas duas forças.
+Estudos recentes reforçam essa perspectiva, mostrando, por exemplo, que desenvolvedores que utilizam o GitHub Copilot tiveram um aumento de 26% nas solicitações de pull requests concluídas. Além disso, a Forrester previu que as tentativas de substituir metade dos desenvolvedores por IA provavelmente falharão. Esses dados ressaltam que, apesar dos avanços tecnológicos, a presença humana continua indispensável na resolução de desafios mais amplos e inovadores.
+Qualidade do Código Gerado por IA: Uma Análise Cautelosa
+A adoção de assistentes de codificação baseados em IA vem acompanhada de preocupações relacionadas à qualidade do código produzido. Embora as ferramentas sejam capazes de gerar trechos de código de forma rápida, há indicações de que o código copiado e colado pode crescer de forma desorganizada, afetando a estrutura e a manutenção dos projetos. Nesse cenário, a revisão humana se torna ainda mais crucial para garantir a coerência e a funcionalidade do software desenvolvido.
+O crescente uso de recursos automatizados tem levado a um aumento significativo na prática de copiar e colar código, em detrimento de um processo de refactoring que melhora o design do código existente. Essa prática pode resultar em sistemas menos estáveis, uma vez que a integração excessiva de trechos não refinados tende a introduzir erros e vulnerabilidades. Assim, a dependência de códigos gerados automaticamente exige um olhar crítico e constante para preservar a qualidade e a sustentabilidade dos produtos.
+Dados empíricos reforçam essa análise, como o estudo realizado pela GitClear, que indicou um aumento de oito vezes em blocos de código duplicados durante 2024. Paralelamente, o relatório DORA do Google apontou que, embora a qualidade do código tenha melhorado modestamente em 3,4%, a estabilidade do software caiu 7,2% com o uso intensivo de IA. Esses números sugerem que, sem a devida supervisão e revisão, os ganhos em produtividade podem vir acompanhados de desafios técnicos significativos.
+O Impacto Real da IA nas Práticas de Desenvolvimento e Empregos
+A integração da IA no ambiente de desenvolvimento de software tem permitido aos profissionais realizar tarefas como pesquisa de APIs e depuração com maior rapidez e eficiência. Essa abordagem automatizada vem sendo adotada por uma parcela expressiva dos programadores, que encontram na tecnologia um meio de potencializar suas habilidades técnicas. Ao mesmo tempo, a evolução dos fluxos de trabalho tem incentivado os profissionais a se concentrarem em atividades que demandam maior criatividade e capacidade de resolução de problemas complexos.
+Entretanto, a expansão do uso de IA também trouxe preocupações relativas ao futuro dos cargos de nível básico. Em alguns casos, as empresas têm optado por reduzir ou até congelar as contratações para posições de entrada, pois um desenvolvedor sênior apoiado por ferramentas inteligentes pode executar tarefas que antes demandavam uma equipe de iniciantes. Apesar dessas apreensões, os dados de emprego demonstram que a substituição em larga escala dos programadores por IA ainda não se concretizou.
+Estatísticas apontam que, em meados de 2023, 44% dos desenvolvedores já faziam uso de ferramentas de IA no seu fluxo de trabalho, mantendo as taxas de desemprego em torno de 2 a 3%. Essa estabilidade nas oportunidades de trabalho indica que a tecnologia tem atuado mais como um reforço para as capacidades dos profissionais do que como um elemento de deslocamento ou substituição. Assim, os avanços da IA reforçam a necessidade de uma sinergia entre automação e supervisão humana, preservando a qualidade e a inovação no desenvolvimento de software.
+Adoção de IA no fluxo de trabalho de desenvolvedores
+A incorporação de ferramentas de IA no dia a dia dos desenvolvedores tornou-se uma prática cada vez mais comum, destacando a importância desses recursos na execução de tarefas cotidianas. Aplicações como o ChatGPT e o GitHub Copilot têm ganhado destaque por auxiliá-los na pesquisa de APIs, geração automática de trechos de código e até na depuração, funcionando como verdadeiros parceiros de trabalho. Essa integração tem evidenciado que a tecnologia pode ampliar a produtividade sem, contudo, substituir a criatividade e o expertise dos programadores.
+A perspectiva de contar com um “programador parceiro infinito” tem transformado a maneira como os profissionais encaram os desafios da codificação e da resolução de problemas. A IA permite a automação de atividades rotineiras, o que libera os desenvolvedores para focarem em aspectos mais estratégicos e inovadores dos projetos. Além disso, o uso dessas ferramentas contribui para a padronização e a consistência do código, embora requeira uma análise crítica para evitar a introdução de erros recorrentes.
+Dados estatísticos corroboram essa adoção crescente: em meados de 2023, 44% dos desenvolvedores passaram a utilizar ferramentas de IA em seu fluxo de trabalho, com o ChatGPT sendo empregado por 83% e o GitHub Copilot por 56% dos profissionais. Esses números demonstram o crescente reconhecimento da IA como uma aliada no processo de desenvolvimento, enfatizando a importância de uma utilização equilibrada que combine o preparo técnico humano com as vantagens da automação.
+Preocupações e riscos percebidos por desenvolvedores juniores
+Embora a IA ofereça inúmeras vantagens em termos de produtividade, ela também gera apreensão entre os desenvolvedores juniores e estagiários que estão iniciando suas carreiras. A sensação de insegurança é alimentada pelo fato de que algumas empresas têm reduzido ou até congelado as contratações para cargos de nível básico, acreditando que um profissional mais experiente, munido de ferramentas inteligentes, possa megenciar a carga de trabalho de uma equipe inteira. Essa tendência pode comprometer a entrada de novos talentos no mercado, afetando a formação das futuras gerações de programadores.
+Essa situação ressalta a importância de se investir em programas de treinamento e desenvolvimento que preparem os profissionais juniores para lidar com a nova realidade do mercado de trabalho. A integração de IA no processo de desenvolvimento não deve servir de argumento para a desvalorização dos talentos em início de carreira, mas sim incentivar a aquisição de habilidades que complementem as capacidades automatizadas. Assim, o desafio consiste em adaptar a formação técnica para incluir não apenas o domínio de linguagens e frameworks, mas também o uso estratégico de ferramentas de inteligência artificial.
+Relatos de 2024, como o ensaio publicado no blog do Stack Overflow, alertam que algumas organizações têm a percepção equivocada de que a IA substituirá os engenheiros juniores. Essa crença pode levar à redução de contratações para cargos básicos, comprometendo o desenvolvimento de novas competências e a diversificação da experiência dentro das equipes de desenvolvimento. Portanto, é fundamental que as empresas equilibrem a adoção de tecnologias avançadas com o investimento em formação e capacitação dos profissionais emergentes.
+Impacto da IA no mercado de trabalho de desenvolvedores
+Apesar de algumas preocupações, os dados atuais indicam que a inteligência artificial não provocou demissões em massa no setor de desenvolvimento de software. A estabilidade das taxas de desemprego para programadores ilustra que, embora o perfil das funções possa estar se transformando, a demanda por engenheiros de software permanece consistente. Fatores econômicos, e não a automação, foram os principais responsáveis pelas recentes demissões observadas em alguns segmentos do setor de tecnologia.
+O mercado de trabalho tem mostrado resiliência, mantendo as taxas de desemprego dos desenvolvedores entre 2% e 3%, mesmo durante períodos de mudanças significativas. A adoção crescente de IA tem o potencial de alterar a composição das competências demandadas, mas não implica a extinção das funções tradicionais dos programadores. Assim, a tecnologia atua como um catalisador que transforma os processos, ao mesmo tempo em que preserva a relevância das habilidades humanas na análise e resolução de problemas complexos.
+Dados concretos reforçam essa perspectiva, com informações de 2023 e 2024 indicando que as oportunidades laborais para programadores permanecem estáveis. Em dezembro de 2024, por exemplo, os índices de desemprego foram registrados em torno de 2,0%, demonstrando que o impacto da IA no mercado de trabalho, embora presente, não resultou em uma substituição generalizada dos profissionais. Essa realidade evidencia a necessidade de constante atualização e adaptação por parte dos desenvolvedores para acompanhar as transformações do setor.
+Adaptação e foco em habilidades humanas únicas
+A crescente automação de tarefas básicas pela inteligência artificial tem levado os desenvolvedores a reavaliar e aprimorar suas competências, focando em habilidades que vão além da simples codificação. Em um ambiente onde a IA é capaz de gerar trechos de código e realizar tarefas repetitivas com precisão, as competências diferenciadoras – como o pensamento crítico, o design de sistemas e a resolução criativa de problemas – tornam-se ainda mais valorizadas. Essa tendência abre caminho para uma nova era em que o diferencial competitivo dos profissionais dependerá, em grande parte, de sua capacidade de inovar e pensar estrategicamente.
+A adaptação ao uso de ferramentas inteligentes é fundamental para que os desenvolvedores possam tirar o melhor proveito da tecnologia sem perder sua essência técnica. Aprender a integrar as soluções automatizadas às rotinas de trabalho e, simultaneamente, manter o rigor nas práticas de desenvolvimento é um desafio que demanda constante atualização e treinamento. Dessa forma, a colaboração entre a expertise humana e a eficiência da IA se revela como a estratégia mais eficaz para enfrentar os desafios presentes e futuros do setor.
+Estudos indicam que empresas que souberem equilibrar o uso de inteligência artificial com o desenvolvimento de habilidades humanas únicas serão as que liderarão o mercado. A automação de tarefas repetitivas diminui a dependência de habilidades básicas de codificação, elevando a importância de competências avançadas na resolução de problemas e na inovação. Assim, a contínua adaptação e o foco na capacitação dos profissionais são elementos essenciais para garantir a relevância e a competitividade dos programadores na era da IA.
+Conclusão
+A análise apresentada evidencia que a inteligência artificial não substituirá os programadores, mas transformará a profissão ao automatizar tarefas repetitivas e permitir um foco maior em competências de nível superior. O desenvolvimento de software passa a depender não só da velocidade na execução de códigos, mas também da capacidade de resolver desafios complexos e inovar continuamente. Nesse contexto, a simbiose entre a tecnologia e as habilidades humanas é o caminho para o sucesso.
+A colaboração entre profissionais e ferramentas inteligentes destaca a importância de manter um equilíbrio entre automação e supervisão humana. Por meio do uso estratégico da IA, desenvolvedores podem aumentar a produtividade sem comprometer a qualidade e a estabilidade dos sistemas. No entanto, é essencial que haja um esforço constante de atualização e capacitação, de modo a preparar os profissionais para os desafios que acompanham a transformação digital.
+O mercado de trabalho para programadores continua em evolução, com a demanda por habilidades de design de sistemas, pensamento crítico e resolução de problemas criativos ganhando cada vez mais relevância. A trajetória futura dependerá da capacidade dos profissionais de integrar essas competências às ferramentas automatizadas, garantindo uma evolução contínua na indústria. Assim, o cenário aponta para uma transformação que valoriza a colaboração e a adaptação como elementos centrais para o sucesso.
+Referências
+Fonte: [Não disponível]. “O Impacto da Inteligência Artificial na Profissão de Programador: Realidade e Perspectivas”. Disponível em: [Não disponível].
+Gostou? Compartilhe!
+Clique para compartilhar no WhatsApp(abre em nova janela)
+WhatsApp
+Clique para compartilhar no LinkedIn(abre em nova janela)
+LinkedIn
+Clique para compartilhar no X(abre em nova janela)
+18+
+Clique para compartilhar no Facebook(abre em nova janela)
+Facebook
+Clique para enviar um link por e-mail para um amigo(abre em nova janela)
+E-mail
+Curtir isso:
+Curtir
+Carregando...
+Inscrever-se
+Acessar
+Notificar de
+novos comentários de acompanhamento
+novas respostas aos meus comentários
+Label
+{}
+[+]
+Nome*
+Email*
+Site
+Δ
+Label
+{}
+[+]
+Nome*
+Email*
+Site
+Δ
+Este site utiliza o Akismet para reduzir spam.
+Saiba como seus dados em comentários são processados
+.
+0
+Comentários
+mais recentes
+mais antigos
+Mais votado
+Feedbacks embutidos
+Ver todos os comentários
+
+
+=== URL: https://www.dio.me/articles/ia-o-futuro-dos-desenvolvedores-e-como-nao-ficar-para-tras-8a762f2385df ===
+Lista de conteúdos
+Paulo Mendes
+12/03/2025 13:50
+Compartilhe
+IA, O Futuro dos Desenvolvedores e Como Não Ficar Para Trás
+A
+inteligência artificial (IA)
+tem revolucionado diversas áreas, e o desenvolvimento de software não é uma exceção. Com o avanço das tecnologias de IA, ferramentas como
+automação de código
+,
+análise preditiva
+,
+geração de código inteligente
+e até mesmo assistentes virtuais estão ganhando cada vez mais espaço no processo de criação de software. Mas a grande pergunta que paira sobre os desenvolvedores é:
+Será que a IA vai tornar os desenvolvedores obsoletos?
+E, caso contrário,
+como os desenvolvedores podem se adaptar para não ficarem para trás?
+O Impacto da IA no Desenvolvimento de Software
+A IA no desenvolvimento de software pode ser vista principalmente em
+duas frentes
+:
+automatização de tarefas repetitivas
+e
+assistência no processo criativo
+. Ferramentas como
+GitHub Copilot
+, que usa IA para sugerir trechos de código, e plataformas de
+testes automatizados
+, que utilizam IA para identificar falhas rapidamente, já estão mostrando como a inteligência artificial pode agilizar o processo de codificação.
+Além disso, a
+análise de dados
+feita por IA pode fornecer informações valiosas sobre como os usuários interagem com uma aplicação, ajudando a otimizar o desenvolvimento de funcionalidades e melhorar a experiência do usuário de forma contínua.
+Outra área promissora é o uso de IA para
+geração automática de código
+. Embora a IA não esteja pronta para criar um software completo de forma autônoma, ela pode gerar partes do código baseando-se em padrões de desenvolvimento ou mesmo em descrições em linguagem natural. Isso pode poupar horas de trabalho manual e aumentar a produtividade, liberando os desenvolvedores para tarefas mais complexas.
+A IA Tornará o Desenvolvedor Obsoleto?
+A resposta curta é
+não
+. Embora a IA possa automatizar muitos aspectos do desenvolvimento de software, ela
+não substituirá
+os desenvolvedores, pelo menos não no futuro próximo. A inteligência artificial pode ser uma ferramenta poderosa para aumentar a produtividade, mas ainda precisa da supervisão humana para garantir a qualidade, a criatividade e a inovação que são características fundamentais do processo de desenvolvimento de software.
+Há várias razões pelas quais os desenvolvedores não se tornarão obsoletos:
+Criatividade e Resolução de Problemas
+: A IA é ótima para seguir padrões e otimizar processos, mas
+não tem a capacidade criativa
+que os desenvolvedores humanos têm. A criação de novas funcionalidades, a resolução de problemas complexos e a adaptação a contextos específicos ainda exigem inteligência humana.
+Empatia e Relação com o Cliente
+: O desenvolvimento de software não é apenas sobre codificação. Ele envolve entender as necessidades dos usuários, traduzir requisitos de negócios em soluções técnicas e garantir que o software atenda aos objetivos de stakeholders e clientes. A IA pode ajudar, mas a
+empatia
+e a
+capacidade de comunicação
+humanas são fundamentais para essas interações.
+Gerenciamento e Tomada de Decisão
+: A IA pode fornecer recomendações, mas a
+tomada de decisão estratégica
+em relação ao design do sistema, priorização de funcionalidades e escolha de tecnologias continua a ser uma tarefa dos desenvolvedores. O julgamento humano é essencial para garantir que o software seja construído de maneira alinhada com os objetivos empresariais.
+Como Não Ficar Para Trás?
+Embora a IA não vá substituir os desenvolvedores, ela certamente mudará a forma como eles trabalham. Portanto, é importante que os desenvolvedores se preparem para esse futuro. Aqui estão algumas dicas para
+não ficar para trás
+:
+1.
+Adapte-se às Ferramentas de IA
+A primeira coisa que um desenvolvedor deve fazer é aprender a utilizar as
+ferramentas baseadas em IA
+que estão transformando o mercado. Ferramentas como
+GitHub Copilot
+ou
+Tabnine
+são exemplos de assistentes de IA que ajudam a gerar código de maneira eficiente e podem aumentar a produtividade. A IA não é uma ameaça, mas uma aliada. Aprender a usá-la da maneira correta pode melhorar a qualidade do seu trabalho.
+2.
+Foque em Soft Skills
+Enquanto a IA pode automatizar muitas tarefas técnicas, as
+soft skills
+como criatividade, comunicação e pensamento crítico são habilidades que dificilmente serão substituídas por máquinas. Desenvolver essas habilidades é fundamental para quem deseja continuar sendo relevante no mercado de trabalho.
+Colaboração
+,
+gestão de equipe
+e
+inteligência emocional
+serão sempre essenciais no desenvolvimento de software.
+3.
+Aprofunde-se em Áreas Avançadas
+A IA está avançando rapidamente, mas também há áreas mais complexas que exigem a compreensão profunda de algoritmos e machine learning. Tornar-se um especialista em
+inteligência artificial
+,
+aprendizado de máquina
+,
+deep learning
+ou
+processamento de linguagem natural
+pode colocar você em uma posição vantajosa. Desenvolver habilidades técnicas em áreas de ponta ajudará a manter sua carreira relevante.
+4.
+Fique Atualizado com as Tendências do Setor
+A tecnologia está em constante evolução, e quem não se atualiza fica para trás.
+Cursos, certificações e workshops
+sobre IA e novas práticas de desenvolvimento de software são essenciais para garantir que você esteja sempre alinhado com as tendências. Participar de comunidades, ler artigos e acompanhar as novidades ajudará a manter sua competitividade.
+5.
+Foque na Arquitetura de Software e Design
+Embora a IA possa gerar código, ela ainda não possui a capacidade de criar soluções arquitetônicas complexas ou entender contextos de negócios específicos. O design e a arquitetura de software são habilidades que demandam visão ampla e estratégica, áreas nas quais os desenvolvedores humanos continuarão a ser necessários.
+Conclusão
+A IA está transformando o desenvolvimento de software, mas, em vez de torná-lo obsoleto, ela
+amplia as possibilidades e melhora a produtividade dos desenvolvedores
+. A chave para não ficar para trás é entender como a IA pode ser uma ferramenta poderosa no processo de desenvolvimento, enquanto se foca em habilidades que a máquina ainda não pode replicar, como criatividade, empatia e tomada de decisões estratégicas. Ao se adaptar às novas tecnologias, continuar aprendendo e aprimorando habilidades interpessoais e técnicas, os desenvolvedores podem se tornar ainda mais valiosos no mercado de trabalho.
+Compartilhe
+0
+1
+Comentar
+Recomendados para você
+Comentários (1)
+DIO Community - 12/03/2025 17:24
+Paulo, seu artigo traz uma visão clara e estratégica sobre a transformação do desenvolvimento de software com IA!
+A DIO acredita que a IA não substituirá os desenvolvedores, mas sim potencializará suas habilidades, permitindo que foquem em aspectos mais estratégicos e criativos. Assim como você destacou, a chave para se manter relevante é saber usar a IA como aliada, aprimorar soft skills e aprofundar-se em áreas avançadas como Machine Learning e arquitetura de software.
+Na DIO, preparamos profissionais para essa nova realidade com conteúdos sobre inteligência artificial, automação e ferramentas que aumentam a produtividade no desenvolvimento. Como você acha que podemos incentivar mais desenvolvedores a enxergar a IA como um diferencial competitivo, e não como uma ameaça?
+Leia a seguir
+Minha Jornada com C# e .NET: Redescobrir a Elegância da Microsoft
+Alexandre Lima - 02 de Julho
+#
+C#
+#
+.NET
+#
+.NET Core
+#
+API
+LF
+Certificações Profissionais: Chave para Crescimento e Reconhecimento no Mercado de Trabalho
+Layla Fé - 02 de Julho
+🎓 Finalizei o Bootcamp WEX - End to End Engineering! 🚀
+Carlos CGS - 02 de Julho
+
+
+=== URL: https://www.industria40.ind.br/artigo/25926-inteligencia-artificial-futuro-codificacao-a-proxima-era-desenvolvimento-software ===
+Artigos
+IA e o futuro da codificação: A próxima era do desenvolvimento de software
+Por: Alois Reitbauer
+30/01/2025
+O cenário do
+desenvolvimento de software
+está passando por uma grande transformação impulsionada pela rápida integração da
+Inteligência Artificial (IA)
+nas práticas de
+codificação
+. Estimativas indicam que quase US$ 1 bilhão foi investido em soluções de código orientadas por IA desde o início de 2022, o que nos torna testemunhas de uma transição que vai muito além da mera
+automação
+. Essa revolução está redefinindo todo o
+ciclo de vida da engenharia de sistemas
+, desafiando nossas percepções sobre o que significa ser um desenvolvedor.
+À medida que chegamos a esse ponto de inflexão, fica claro que o
+futuro da codificação
+não está em resistir a essas mudanças, mas em evoluir nossa abordagem para a educação e a prática no desenvolvimento de software.
+Com a Inteligência Artificial assumindo um papel cada vez mais proeminente na codificação, o conjunto de ferramentas tradicionais do desenvolvedor está se expandindo para incluir assistentes impulsionados por IA. Essas ferramentas não apenas automatizam tarefas rotineiras, mas também remodelam como lidamos com a resolução de problemas na engenharia de software. No entanto, essa integração traz novos desafios que precisam ser enfrentados diretamente. Por exemplo, uma dependência excessiva de código gerado por IA pode levar à perda de habilidades essenciais pelos desenvolvedores ao longo do tempo. Embora a IA seja eficiente em tarefas rotineiras, ela ainda não substitui o julgamento humano, especialmente em situações complexas.
+O crescimento da IA na codificação também gerou um debate sobre se é realmente necessário que todos saibam codificar. Embora a democratização da codificação continue importante, o objetivo não é criar um exército de programadores cotidianos, mas sim formar uma geração de
+desenvolvedores qualificados
+, capazes de aproveitar o poder da IA enquanto mantêm a integridade, a qualidade e a segurança do software.
+Continua depois da publicidade
+Os
+desenvolvedores
+de hoje precisam não apenas ser proficientes em escrever código, mas também habilidosos ao trabalhar com ferramentas de IA para avaliar e refinar os resultados gerados, permanecendo atentos a riscos potenciais. Isso significa abraçar o papel de "parceiros de programação da IA”, deixando de enxergá-la apenas como uma ferramenta e a reconhecendo como uma parceira colaborativa capaz de produzir códigos sofisticados. É preciso estar atento, porém, ao fato de que
+a IA não trabalha sozinha
+. O desenvolvedor humano desempenha um papel crucial ao fornecer contexto, verificar a
+qualidade do código
+e integrá-lo em projetos de sistemas mais amplos. Essa mudança exige não apenas competências técnicas, mas também um nível mais elevado de
+pensamento crítico
+e colaboração do que nunca.
+Um desenvolvedor moderno também precisa dominar a
+engenharia de prompt
+e criar instruções eficazes para assistentes de codificação baseados em IA. Eles devem desenvolver um olhar atento para avaliar códigos, identificando e resolvendo vulnerabilidades de segurança e problemas de desempenho. Ainda, devem lidar com as implicações éticas da tecnologia no desenvolvimento de software, fazendo escolhas responsáveis que moldem o futuro do mundo digital.
+Dado o ambiente de codificação em rápida evolução, nossa abordagem em relação à educação precisa ser aprimorada. Isso é especialmente importante considerando o Plano Brasileiro de Inteligência Artificial (PBIA), cuja previsão é investir R$ 23 bilhões entre 2024 e 2028 com focos diversos no setor, inclusive na
+formação e capacitação
+de pessoas para saberem como trabalhar com IA.
+A educação em codificação deve preparar os desenvolvedores para os desafios de hoje e do futuro. O currículo deve enfatizar a compreensão do comportamento e das limitações da Inteligência Artificial, o uso seguro de bibliotecas de código aberto e a análise crítica de soluções geradas pela IA. Acima de tudo, deve abraçar princípios fundamentais de
+engenharia de software
+que transcendem linguagens ou ferramentas específicas. Essa mudança educacional não é opcional; é imperativa. Sem ela, corremos o risco de formar uma geração de desenvolvedores despreparados para lidar com as complexidades da codificação assistida por IA. Devemos agir agora para garantir que os talentos do futuro estejam prontos para o mundo em rápida mudança.
+É preciso se desvincular da ideia de que a revolução da IA é uma ameaça para os desenvolvedores humanos. Devemos passar a vê-la como uma oportunidade para transformar e elevar a engenharia de software. Ao abraçar a IA e ao focar no desenvolvimento de habilidades como avaliação crítica, compreensão do comportamento da IA e uma sólida base de engenharia de software, podemos formar desenvolvedores mais capacitados e inovadores.
+O
+futuro da programação
+não envolve competir com a IA, mas sim aprender a colaborar com ela de maneira eficaz, criando soluções mais inteligentes e aprimoradas. Ao adaptar nossas habilidades, nossas estruturas educacionais e nossa mentalidade, podemos liberar todo o potencial da IA na codificação, e criar soluções de software mais robustas que moldarão o futuro digital de forma positiva.
+*Imagem de capa:
+Depositphotos.com
+*O conteúdo e a opinião expressa neste artigo não representam a opinião do Grupo CIMM e são de responsabilidade do autor.
+Tags
+indústria 4.0
+engenharia de sistemas
+engenharia de software
+engenharia de prompt
+qualificação profissional
+desenvolvedores
+alois reitbauer
+inteligência artificial
+desenvolvimento de software
+softwares
+tecnologia da informação
+Gostou? Então compartilhe:
+Alois Reitbauer
+Estrategista-Chefe de Tecnologia da Dynatrace
+Conteúdos relacionados
+Artigos
+Como a IA e o aprendizado de máquina estão mudando a automação industrial
+Artigos
+Por que investir em IA e Cloud é a chave para o sucesso dos negócios em 2024
+Artigos
+O futuro do design de produtos orientado pela inteligência artificial
+Artigos
+Falta de integração de dados é obstáculo à inovação da IA
+Soluções
+Softwares / Informatização
+Participe dos Grupos do Canal da Indústria 4.0
+Receba as melhores notícias e artigos:
+WhatsApp - Entrar no grupo
+Telegram - Entrar no grupo
+ZWCAD: Por que começar a usar?
+Acessar material
+Últimos
+Thyssenkrupp expande uso das tecnologias de...
+01/07/2025
+O futuro da hiperautomação: Tendências...
+30/06/2025
+On-Industry Experimentation: a combinação entre...
+26/06/2025
+Internet industrial muda processo de produção e...
+25/06/2025
+Yaskawa Motoman lança robô inteligente Next 10...
+24/06/2025
+Fique conectado conosco
+Saiba como se manter atualizado com a Indústria 4.0.
+Cadastro gratuito
+26/05/2025
+Como a IA Generativa está redefinindo o papel dos líderes de engenharia de software
+02/07/2025
+Metade das decisões de negócios serão aperfeiçoadas ou automatizadas por IA, diz estudo
+02/07/2025
+Nova solução da Siemens com IA e robótica transforma a operação de veículos guiados automatizados
+
+
+=== URL: https://www.reddit.com/r/brdev/comments/19153cr/at%C3%A9_que_ponto_vcs_acham_que_a_intelig%C3%AAncia/?tl=pt-br ===
+Go to brdev
+r/brdev
+r/brdev
+Bem-vindo à nossa comunidade! 
+Todos os assuntos relacionados a TI, programação e afins são bem-vindos no r/brdev
+Members
+Online
+•
+[deleted]
+Até que ponto vcs acham que a inteligência artificial vai substituir a programação e pq?
+Minha opinião
+Nessa questão há muitas opiniões alheia. Mas o que eu acho sobre é os menos experientes vão encontrar uma maior dificuldade no mercado de trabalho, além de que as vagas vão diminuir. Pq? Com a I.A muita programação vai ser acelerada e será preciso menos pessoas, e pessoas melhores, para conseguir realmente construir algo com I.A e ver se está certo, além de poderem resolver coisas mais complexas que uma I.A talvez não consiga.
+Ainda acho provável que a maioria das pessoas que se dizem programadoras, no futuro, vão ter uma qualidade ainda menor. Hj em dia já tem mt gente que faz algum cursinho qualquer que diz estar pronto para o mercado de trabalho e elas acreditam. Ando vendo muita divulgações de
+I.As
+que escrevem o código que vc pedir, ou vc tira print de algum site (ex: netflix) e ela faz um código para retornar algo igual a aquilo. Essas divulgações são feitas afirmando, se usar isso, a sua eficiência irá aumentar. Para uma pessoa que faz um cursinho qualquer, isso será verdade. Se acostumando a usar uma I.A para criar algo, ela mesma não será capaz de criar um programa simples e muito menos mais complexos.
+Por outro lado, talvez no futuro terá mais arquitetos de software do que desenvolvedores em si, pq com as
+I.As
+talvez vc só precise saber como criar um software, e não como programar por completo.
+Agr sobre quando as
+I.As
+vão começar a substituir de forma significante, não tenho a mínima ideia. Vcs acham que vai ser quando e pq?
+Read more
+Share
+Share
+
+
+=== URL: https://exame.com/bussola/a-inteligencia-artificial-vai-substituir-os-desenvolvedores/ ===
+Um conteúdo
+Bússola
+Home
+Bússola
+A inteligência artificial vai substituir os desenvolvedores?
+Entenda como aspectos fundamentalmente humanos podem garantir o futuro da profissão
+A inteligência artificial tem a sua capacidade direcionada na execução  (Userba011d64_201/Getty Images)
+Bússola
+Plataforma de conteúdo
+Publicado em
+14 de julho de 2023 às
+20h30
+.
+Por Wesley Willians*
+Nos últimos meses, o processo de desenvolvimento acelerado da
+Inteligência Artificial (IA)
+foi o tema mais debatido no mundo da tecnologia. Se antes as imagens geradas pelo Midjourney eram apenas experimentos distantes, hoje elas já são tão convincentes que começam a se confundir com a realidade. O mesmo pode-se dizer das respostas geradas pelo ChatGPT, que apresentam um impressionante grau de assertividade dia após dia.
+Mas a pergunta de milhões é: a evolução da IA generativa realmente pode acabar com boa parte dos empregos atuais?
+Pensando na área tech, o atual potencial trazido por essas plataformas já vem impactando positivamente no trabalho dos desenvolvedores, mas isso não quer dizer que elas estão perto de substituir por completo a expertise dos profissionais. Até porque o grande desafio para desenvolver aplicações críticas, na maioria das vezes, é saber o que fazer e não como executar. Hoje, a IA tem a sua capacidade direcionada na execução. A parte mais analítica ainda não faz parte do escopo delas.
+Isso não quer dizer, porém, que a IA não seja valiosa para o
+mercado de programação
+. Pelo contrário, a produtividade dos devs que estão utilizando-as têm aumentado consideravelmente, uma vez que ela consegue fazer sugestões de códigos, algoritmos, geração de testes automatizados e até mesmo produção automática de documentação.
+No entanto, o grande ponto é que o ChatGPT e outras plataformas similares ainda não possuem o
+pensamento crítico de negócio
+. Sendo assim, elas não conseguem definir uma arquitetura pensando no contexto e restrições necessárias para a aplicação. Atualmente o seu uso está muito mais atrelado à complementação de código baseado na conjuntura que o profissional já idealizou e desenvolveu.
+Até porque, programar não se resume apenas a escrever linhas de código. Esse trabalho é baseado na somatória da aplicação de lógica e conhecimento técnico com uma dose significativa de criatividade e intuição por parte do profissional. Em outras palavras, os devs precisam saber atuar diante de problemas complexos que exigem uma capacidade resolutiva, que uma máquina ainda não consegue suprir.
+Embora a inteligência artificial possa ajudar na automação de tarefas rotineiras, ela não é capaz de igualar a criatividade e intuição humana diante dos desafios. Muito pelo contrário, IAs generativas como Chat GPT, por exemplo, não possuem nenhuma inteligência ou qualquer coisa do tipo. Elas são parte de
+algoritmos sofisticados
+, treinados com uma grande quantidade de dados e retornam informações baseadas em padrões, ou seja, não há qualquer tipo de consciência.
+Como o processo de programação precisa envolver as necessidades e demandas dos usuários, é preciso que pontos “externos”, ou do além da tela, também sejam considerados. Sem essa compreensão abrangente do contexto, algo pouco explorado nas aplicações da IA, o trabalho tende a ficar comprometido. Apesar dela ser importante no exercício de sugestão e assistência da codificação, o sensorial humano ainda é fundamental para a tomada de decisões eficazes e implementações assertivas.
+Outro ponto fundamental que permeia o trabalho dos devs é a
+questão ética
+. Os profissionais da área são constantemente desafiados a conjecturar o equilíbrio entre a funcionalidade técnica e a moralidade das suas ações. Assim, itens como a privacidade e segurança dos dados atrelados aos sistemas que estão sendo desenvolvidos representam uma importância significativa no seu dia a dia. Essa capacidade de ponderar os aspectos éticos das aplicações é algo que a IA não possui expertise para orientar e ainda nem está no seu foco de atuação.
+Por todos esses motivos, posso afirmar claramente que a IA não deve tomar o emprego dos devs a curto prazo. No entanto, com certeza, o desenvolvedor que souber usar ela a seu favor, seja para completar um código ou tirar uma dúvida pontual, irá se sobressair em relação aqueles que ainda não utilizam tais ferramentas.
+*Wesley Willians
+é CEO e fundador da Full Cycle e School of Net
+Siga a Bússola nas redes:
+Instagram
+|
+Linkedin
+|
+Twitter
+|
+Facebook
+|
+Youtube
+Veja também
+Uso de inteligência artificial no branding: tecnologia + criatividade
+Simone Vicente Reis: O papel da inteligência artificial na saúde
+IA pode proporcionar segurança na aplicação de provas online
+Acompanhe tudo sobre:
+Inteligência artificial
+ChatGPT
+Algoritmos
+Programadores
+futuro-do-trabalho
+Próximo
+Atores protagonizam maior paralisação da produção cinematográfica em décadas nos EUA
+Mais de Bússola
+Eletrificação pode reduzir em 35% as emissões no transporte no Brasil até 2050, aponta estudo
+Diretora de Sustentabilidade da Motiva, Juliana Silva, destacou as oportunidades de projetos verdes para investidores globais e líderes em ESG em evento em Londres
+Supermercados com câmeras e análise por IA começam nova era do varejo
+Tecnologia de análise de comportamento já é utilizada na Ásia e na América do Norte
+Bússola & Cia: parceria bate recordes no transporte de papel e celulose
+Comparado ao ano passado, Projeto KBT transportou 20% mais carga em abril de 2025. Confira outras notícias sobre negócios, sustentabilidade, eventos, mercado e indústria
+Opinião: A descarbonização da indústria do aço é uma pauta urgente para o planeta
+A indústria do aço, um pilar da civilização moderna, enfrenta o desafio urgente de reduzir suas emissões. O ferro verde (HBI) surge como uma solução essencial para um futuro de baixo carbono e um planeta mais saudável
+
+
+=== URL: https://aws.amazon.com/pt/what-is/prompt-engineering/ ===
+O que é a computação em nuvem?
+Hub de conceitos de computação em nuvem
+IA generativa
+Gen-AI
+O que é engenharia de prompts?
+Criar uma conta da AWS
+Conheça os serviços de IA generativa
+Crie, implante e execute aplicações de IA generativa na AWS
+Confira a IA generativa na AWS
+Inove mais rapidamente com o conjunto mais abrangente de serviços de IA generativa
+Procure treinamentos de IA generativa
+Comece o treinamento de IA generativa com conteúdo criado por especialistas da AWS
+Leia blogs sobre IA generativa
+Receba as notícias mais recentes e as práticas recomendadas sobre produtos de IA generativa da AWS
+O que é engenharia de prompt?
+O que é um prompt?
+Por que a engenharia de prompt é importante?
+Quais são os casos de uso da engenharia de prompt?
+O que são técnicas de engenharia de prompt?
+Quais são as práticas recomendadas da engenharia de prompt?
+Como a AWS pode atender os seus requisitos de IA generativa?
+O que é engenharia de prompt?
+A engenharia de prompts é o processo em que você orienta as soluções de
+inteligência artificial generativa (IA generativa)
+para gerar os resultados desejados. Embora a IA generativa tente imitar os humanos, ela requer instruções detalhadas para criar resultados relevantes e de alta qualidade. Na engenharia de prompt, você escolhe os formatos, frases, palavras e símbolos mais adequados para orientar a IA a interagir com seus usuários de forma mais significativa. Os engenheiros de prompt usam a criatividade e tentativa e erro para criar uma coleção de textos de entrada, para que a IA generativa de uma aplicação funcione conforme o esperado.
+O que é um prompt?
+Um prompt é um texto em linguagem natural que solicita que a
+IA generativa
+execute uma tarefa específica. A IA generativa é uma solução de inteligência artificial que cria novos conteúdos, como histórias, conversas, vídeos, imagens e músicas. Ela é alimentada por modelos muito grandes de machine learning (ML) que usam as redes neurais profundas que foram pré-treinadas em grandes quantidades de dados.
+Os grandes modelos de linguagem (LLMs) são muito flexíveis e podem realizar várias tarefas. Por exemplo, eles podem resumir documentos, completar frases, responder perguntas e traduzir idiomas. Para informações específicas do usuário, os modelos funcionam prevendo a melhor saída que eles determinam em treinamentos anteriores.
+No entanto, por serem tão abertos, seus usuários podem interagir com as soluções de IA generativas por meio de inúmeras combinações de dados de entrada. Os modelos de linguagem de IA são muito poderosos e não exigem muito para começar a criar conteúdo. Até mesmo uma única palavra é suficiente para que o sistema crie uma resposta detalhada.
+Apesar disso, nem todo tipo de entrada gera resultados úteis. Os sistemas de IA generativa exigem contexto e informações detalhadas para produzir respostas precisas e relevantes. Quando você cria prompts de forma sistemática, você obtém criações mais significativas e utilizáveis. Na engenharia de prompt, você refina continuamente os prompts até obter do sistema de IA os resultados desejados.
+Leia sobre IA generativa »
+Leia sobre grandes modelos de linguagem (LLMs) »
+Por que a engenharia de prompt é importante?
+As tarefas da engenharia de prompt aumentaram significativamente desde o lançamento da IA generativa. Os engenheiros desse tipo de engenharia preenchem a lacuna entre os usuários finais e o grande modelo de linguagem. Eles identificam scripts e modelos que seus usuários podem personalizar e concluir para obter o melhor resultado dos modelos de linguagem. Esses engenheiros experimentam diferentes tipos de entradas para criar uma biblioteca de prompts que os desenvolvedores de aplicações podem reutilizar em diferentes cenários.
+A engenharia de prompt torna as aplicações de IA mais eficientes e eficazes. Os desenvolvedores de aplicações normalmente encapsulam a entrada aberta do usuário em um prompt antes de passá-la para o modelo de IA.
+Por exemplo, considere os
+chatbots
+de IA. Um usuário pode inserir uma declaração de problema incompleta, como
+“Onde comprar uma camisa.”
+Internamente, o código da aplicação usa um prompt desenvolvido que diz:
+“Você é assistente de vendas de uma empresa de roupas. Um usuário localizado no Alabama, Estados Unidos, está perguntando onde comprar uma camisa. Responda com as três lojas mais próximas que atualmente estocam camisas.”
+O chatbot então gera informações mais relevantes e precisas.
+A seguir, discutiremos alguns benefícios da engenharia de prompt.
+Maior controle para o desenvolvedor
+A engenharia de prompt oferece aos desenvolvedores mais controle sobre as interações dos usuários com a IA. Prompts eficazes fornecem a intenção e estabelecem o contexto para os grandes modelos de linguagem. Eles ajudam a IA a refinar a saída e apresentá-la de forma concisa no formato necessário.
+Eles também evitam que os usuários usem indevidamente a IA ou solicitem algo que a IA não saiba ou não possa manipular com precisão. Por exemplo, talvez você queira impedir que seus usuários gerem conteúdo impróprio em uma aplicação comercial de IA.
+Melhor experiência do usuário
+Os usuários evitam tentativas e erros e ainda recebem respostas coerentes, precisas e relevantes das ferramentas de IA. A engenharia de prompt facilita para que os usuários obtenham resultados relevantes já no primeiro prompt. Isso ajuda a mitigar a tendência que pode estar presente na tendência humana existente nos dados de treinamento dos grandes modelos de linguagem.
+Além disso, ela aprimora a interação entre o usuário e a IA para que a IA entenda a intenção do usuário, mesmo com o mínimo de entrada. Por exemplo, solicitações para resumir um documento legal e um artigo de notícias obtêm resultados diferentes ajustados de acordo com o estilo e o tom. Isso é pertinente mesmo que os dois usuários simplesmente peçam à aplicação:
+“Resuma este documento.”
+Maior flexibilidade
+Níveis mais altos de abstração melhoram os modelos de IA e permitem que as organizações criem ferramentas mais flexíveis em grande escala. Um engenheiro pode criar prompts com instruções de domínio neutro, destacando links lógicos e padrões amplos. As organizações podem reutilizar rapidamente os prompts em toda a empresa para expandir seus investimentos em IA.
+Por exemplo, para encontrar oportunidades de otimização de processos, o engenheiro de prompts pode criar solicitações diferentes que treinam o modelo de IA para encontrar ineficiências usando sinais amplos em vez de dados específicos do contexto. Os prompts podem então ser usados para diversos processos e unidades de negócios.
+Quais são os casos de uso da engenharia de prompt?
+As técnicas de engenharia de prompt são usadas em sistemas sofisticados de IA para melhorar a experiência do usuário com o modelo de linguagem de aprendizado. Veja alguns exemplos.
+Especialistas no assunto
+A engenharia de prompt desempenha um papel fundamental nas aplicações que exigem que a IA responda com expertise no assunto. Um engenheiro de prompt com experiência na área pode orientar a IA a referenciar as fontes corretas e estruturar a resposta de forma adequada com base na pergunta feita.
+Por exemplo, na área médica, um médico pode usar um modelo de linguagem da engenharia de prompt para gerar diagnósticos diferenciais para um caso complexo. O profissional médico só precisa inserir os sintomas e os detalhes do paciente. A aplicação usa prompts criados pela engenharia para orientar a IA a primeiro listar as possíveis doenças associadas aos sintomas inseridos. Em seguida, ela restringe a lista com base nas informações adicionais do paciente.
+Pensamento crítico
+As aplicações de pensamento crítico exigem o modelo de linguagem para resolver problemas complexos. Para isso, o modelo analisa as informações de diferentes ângulos, avalia sua credibilidade e toma decisões fundamentadas. A engenharia de prompt aprimora os recursos de análise de dados de um modelo.
+Por exemplo, em cenários de tomada de decisão, você pode solicitar que um modelo liste todas as opções possíveis, avalie cada opção e recomende a melhor solução.
+Criatividade
+A criatividade envolve a geração de novas ideias, conceitos ou soluções. A engenharia de prompt pode ser usada para aprimorar as habilidades criativas de um modelo em vários cenários.
+Por exemplo, em cenários de escrita, um escritor pode usar um modelo de engenharia de prompt para ajudar a gerar ideias para uma história. O escritor pode solicitar que o modelo liste possíveis personagens, cenários e pontos da trama e, em seguida, desenvolver uma história com esses elementos. Em outro exemplo, um designer gráfico pode solicitar que o modelo gere uma lista de paletas de cores que evoquem uma certa emoção e, em seguida, crie um design usando essa paleta.
+O que são técnicas de engenharia de prompt?
+A engenharia de prompt é um campo dinâmico e em evolução. São necessárias habilidades linguísticas e expressão criativa para ajustar os prompts e obter a resposta desejada das ferramentas de IA generativa.
+Aqui estão alguns exemplos de técnicas que a engenharia de prompt usa para melhorar as tarefas de processamento de linguagem natural (PLN) dos modelos de IA.
+Prompting com cadeia de pensamento
+O prompting com cadeia de pensamento é uma técnica que separa uma questão complexa em partes menores e lógicas que imitam uma linha de pensamento. Isso ajuda o modelo a resolver problemas em uma série de etapas intermediárias, em vez de responder diretamente à pergunta. Isso aumenta a capacidade de raciocínio do modelo.
+Você pode receber vários resultados em cadeia para tarefas complexas e pode optar pela conclusão mais comumente alcançada. Se todos os resultados discordarem significativamente, uma pessoa pode ser consultada para corrigir a cadeia de pensamento.
+Por exemplo, se a pergunta for
+“Qual é a capital da França?”
+o modelo pode retornar vários resultados, levando a respostas como
+“Paris”
+,
+“A capital da França é Paris”
+e
+“Paris é a capital da França”.
+Como todos os resultados levam à mesma conclusão,
+“Paris”
+será selecionada como a resposta final.
+Prompting da árvore de pensamento (ToT)
+A técnica da árvore de pensamento generaliza o prompting da cadeia de pensamento. Ela solicita que o modelo gere as próximas etapas possíveis. Em seguida, ela executa o modelo em cada possível etapa seguinte usando um método de busca em árvore.
+Por exemplo, se a pergunta for
+“Quais são os efeitos das mudanças climáticas?”
+o modelo pode primeiro gerar as próximas etapas possíveis, como
+“Listar os efeitos ambientais
+”
+e
+“Listar os efeitos sociais”.
+Em seguida, ele poderia elaborar cada uma delas nas etapas subsequentes.
+Prompting maiêutico
+O prompting maiêutico é semelhante ao prompting da árvore de pensamento. É solicitado que o modelo responda a uma pergunta com uma explicação. O modelo é então solicitado a explicar partes da explicação. As explicações inconsistentes no modelo de árvore são podadas ou descartadas. Isso melhora o desempenho nos raciocínios complexos de senso comum.
+Por exemplo, se a pergunta for
+“Por que o céu é azul?”
+o modelo pode primeiro responder:
+“O céu parece azul ao olho humano porque as ondas curtas de luz azul são espalhadas em todas as direções pelos gases e partículas na atmosfera da Terra.”
+Em seguida, ele pode expandir partes dessa explicação como, porque a luz azul é mais dispersa do que outras cores ou do que a atmosfera da Terra é composta.
+Prompting baseado na complexidade
+Essa técnica de engenharia rápida envolve o retorno de vários resultados da cadeia de pensamento. Ela escolhe os resultados com as cadeias de pensamento mais longas e, em seguida, escolhe a conclusão mais comumente alcançada.
+Por exemplo, se a pergunta for um problema matemático complexo, o modelo poderá produzir vários resultados, cada um envolvendo várias etapas de cálculos. Ele consideraria os resultados com a maior cadeia de pensamento, o que, neste exemplo, seria o maior número de etapas de cálculos. Os resultados que chegassem a uma conclusão comum com outros resultados seriam selecionados como a resposta final.
+Prompting de conhecimento gerado
+Essa técnica envolve solicitar que o modelo gere primeiro os fatos relevantes necessários para concluir a solicitação. Em seguida, ele prossegue com a conclusão do prompt. Isso geralmente resulta em maior qualidade da conclusão, pois o modelo está condicionado a fatos relevantes.
+Por exemplo, imagine que um usuário solicite que o modelo escreva um ensaio sobre os efeitos do desmatamento. O modelo pode primeiro gerar fatos como
+“o desmatamento contribui para a mudança climática”
+e
+“o desmatamento leva à perda de biodiversidade”.
+Em seguida, ele pode elaborar os pontos do ensaio.
+Prompts to tipo menor para o maior
+Nessa técnica de engenharia de prompt, é necessário que o modelo primeiro liste os subproblemas de um problema e depois o solucione. Essa abordagem garante que subproblemas posteriores possam ser resolvidos com a ajuda de respostas aos subproblemas anteriores.
+Por exemplo, imagine que um usuário solicite ao modelo um problema matemático como
+“Resolva x na equação 2x + 3 = 11”
+. O modelo pode primeiro listar os subproblemas como
+“Subtraia 3 dos dois lados”
+e
+“Divida por 2”
+. Em seguida, ele pode resolvê-los em sequência para obter a resposta final.
+Prompts de ajuste automático
+Nessa técnica, o modelo é solicitado a resolver o problema, criticar a solução e, em seguida, solucionar o problema considerando o problema, a solução e a crítica. O processo de resolução de problemas se repete até atingir um motivo predeterminado para parar. Por exemplo, ele pode ficar sem tokens ou tempo, ou o modelo pode gerar um token de parada.
+Por exemplo, imagine que um usuário solicite a uma modelo
+“Escreva um pequeno ensaio sobre literatura.”
+O modelo pode redigir um ensaio, criticá-lo por falta de exemplos específicos e reescrever o ensaio para incluir exemplos específicos. Esse processo pode se repetir até que o ensaio seja considerado satisfatório ou até que um critério de interrupção seja atendido.
+Prompt de estímulo direcional
+Essa técnica de engenharia de prompt inclui uma dica ou sugestão, como as palavras-chave desejadas, para orientar o modelo de linguagem a obter o resultado desejado.
+Por exemplo, se a solicitação for escrever um poema sobre o amor, o engenheiro de prompt poderá criar sugestões que incluam
+“coração”
+,
+“paixão”
+e
+“eterno”
+. O modelo poderá dar a sugestão:
+“Escreva um poema sobre o amor que inclua as palavras 'coração', 'paixão' e 'eterno'.”
+Isso orientaria o modelo para criar um poema com essas palavras-chave.
+Quais são as práticas recomendadas da engenharia de prompt?
+Uma boa engenharia de prompt exige que você comunique as instruções com o contexto, o escopo e a resposta esperada. A seguir, compartilhamos algumas das práticas recomendadas.
+Prompts inequívocos
+Defina claramente a resposta desejada no prompt para evitar interpretações errôneas pela IA. Por exemplo, se você estiver solicitando um resumo de um romance, indique claramente que está procurando um resumo, não uma análise detalhada. Isso ajuda a IA a se concentrar apenas em sua solicitação e fornecer uma resposta alinhada ao seu objetivo.
+Contexto adequado no prompt
+Forneça um contexto adequado no prompt e inclua os requisitos do resultado na digitação do prompt, limitando-os a um formato específico. Por exemplo, digamos que você queira uma lista dos filmes mais populares da década de 1990 em uma tabela. Para obter o resultado exato, indique explicitamente quantos filmes deseja que sejam listados e solicite a formatação da tabela.
+Equilíbrio entre as informações direcionadas e o resultado desejado
+Equilibre simplicidade e complexidade em seu prompt para evitar respostas vagas, dissociadas ou inesperadas. Um prompt muito simples pode não ter contexto, enquanto um muito complexo pode confundir a IA. Isso é importante principalmente para tópicos complexos ou para a linguagem específica de um domínio, que podem ser menos familiares para a IA. Use uma linguagem simples e reduza o tamanho do prompt para tornar sua pergunta mais compreensível.
+Experimente e refine o prompt
+A engenharia de prompt é um processo iterativo. É essencial experimentar ideias diferentes e testar os prompts de IA para ver os resultados. Você pode precisar de várias tentativas para otimizar a precisão e a relevância. Testes e iterações contínuos reduzem o tamanho do prompt e ajudam o modelo a gerar melhores resultados. Não há regras fixas sobre como a IA gera informações, portanto, flexibilidade e adaptabilidade são essenciais.
+Como a AWS pode atender os seus requisitos de IA generativa?
+A Amazon Web Services (AWS) oferece uma grande variedade de ferramentas abrangentes para criar e usar a IA generativa. Por exemplo, você pode usar estes serviços:
+Uso do
+Amazon CodeWhisperer
+para
+gerar sugestões de código
+que variam de trechos a funções completas em tempo real de acordo com comentários e código existente.
+Amazon Bedrock
+para acelerar o desenvolvimento de aplicações de IA generativa usando modelos de linguagem por meio de uma API, sem gerenciar a infraestrutura.
+Amazon SageMaker JumpStart
+para descobrir, explorar e implantar modelos de linguagem de código aberto. Por exemplo, você pode trabalhar com modelos como OpenLLaMA, RedPajama, MPT-7B da MosaicML, FLAN-T5, GPT-NeoX-20B e BLOOM.
+Se você preferir criar seus próprios modelos, use o
+Amazon SageMaker
+. Ele fornece infraestrutura e ferramentas gerenciadas para acelerar a criação, o treinamento e a implantação de modelos escaláveis, confiáveis e seguros.
+Comece a usar a engenharia de prompt na AWS
+criando uma conta
+hoje mesmo.
+Próximas etapas na AWS
+Confira recursos adicionais relacionados a produtos
+Inove mais rápido com os serviços de IA generativa da AWS
+Cadastre-se para obter uma conta gratuita
+Obtenha acesso instantâneo ao nível gratuito da AWS.
+Cadastre-se
+Comece a criar no console
+Comece a criar no Console de Gerenciamento da AWS.
+Faça login
+
