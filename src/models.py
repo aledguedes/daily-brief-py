@@ -1,82 +1,97 @@
-from sqlalchemy import Column, Integer, String, DateTime, Enum
-from sqlalchemy.orm import relationship
-from sqlalchemy.ext.declarative import declarative_base
+# src/models.py
+
+from sqlalchemy import Column, Integer, String, DateTime, Enum, Text
 from sqlalchemy.sql import func
 from pydantic import BaseModel, Field
-from typing import List, Dict, Optional
+from typing import List, Optional
 from datetime import datetime
-
 from src.database import Base
 
-class AutomationRequest(Base):
-    __tablename__ = "tbl_automation_requests"
+# -----------------------------------------------
+# Modelos do Banco de Dados (SQLAlchemy)
+# -----------------------------------------------
+
+
+class Pauta(Base):
+    """
+    Modelo da tabela 'tbl_pautas' que armazena as sugestões de conteúdo,
+    sejam elas automáticas ou manuais.
+    """
+
+    __tablename__ = "tbl_pautas"
 
     id = Column(Integer, primary_key=True, index=True)
-    output_format = Column(String(50), nullable=False)
-    theme = Column(String(255), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    title = Column(String(255), nullable=False, comment="O tema ou título da pauta")
+    source_urls = Column(
+        Text, nullable=True, comment="URLs de fonte, separadas por vírgula"
+    )
+    relevance_reason = Column(
+        String(1000),
+        nullable=True,
+        comment="Justificativa da relevância (gerado pela IA)",
+    )
 
-    def __repr__(self):
-        return f"<AutomationRequest(id={self.id}, theme='{self.theme}', format='{self.output_format}')>"
+    # O conteúdo curado pelo humano no frontend
+    curated_content = Column(
+        Text, nullable=True, comment="Conteúdo bruto editado e limpo pelo usuário"
+    )
 
-class TrendingTopicSuggestion(Base):
-    __tablename__ = "tbl_trending_topic_suggestions"
+    # Status para controlar o fluxo de trabalho
+    status = Column(
+        Enum(
+            "SUGGESTED", "MANUAL", "CURATED", "GENERATED", "FAILED", name="pauta_status"
+        ),
+        default="SUGGESTED",
+    )
 
-    id = Column(Integer, primary_key=True, index=True)
-    topic_name = Column(String(255), nullable=False)
-    source = Column(String(50), nullable=False)
-    relevance_reason = Column(String(1000), nullable=False)
-    url = Column(String(500), nullable=True)
-    status = Column(Enum('NEW', 'APPROVED', 'REJECTED', name='trend_status'), default='NEW')
+    # Origem da pauta para fácil filtragem
+    origin = Column(
+        Enum("AUTOMATIC", "MANUAL", name="pauta_origin"), default="AUTOMATIC"
+    )
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     def __repr__(self):
-        return f"<TrendingTopicSuggestion(id={self.id}, topic_name='{self.topic_name}', status='{self.status}')>"
+        return f"<Pauta(id={self.id}, title='{self.title}', status='{self.status}')>"
 
-class TriggerRequest(BaseModel):
-    output_format: str
-    theme: Optional[str] = None
 
-class PostRequestDTO(BaseModel):
-    title: Dict[str, str]
-    excerpt: Dict[str, str]
-    content: Dict[str, str]
-    image: Optional[str] = None
-    author: Optional[str] = None
-    tags: Optional[List[str]] = None
-    category: Optional[str] = None
-    metaDescription: Dict[str, str]
-    affiliateLinks: Optional[Dict[str, str]] = None
-    status: Optional[str] = None
-    publishedAt: Optional[str] = None
-    readTime: Optional[str] = None
+# -----------------------------------------------
+# Modelos da API (Pydantic) - Os "Moldes"
+# -----------------------------------------------
 
-class SocialPostRequestDTO(BaseModel):
-    socialTitle: Dict[str, str] = Field(..., alias="title")
-    socialContent: Dict[str, str] = Field(..., alias="content")
-    socialImageUrl: Optional[str] = None
-    socialMediaPlatform: Optional[str] = None
-    originalPostId: Optional[int] = None
-    status: Optional[str] = None
-    publishedSocialAt: Optional[str] = None
-    impressions: Optional[int] = 0
-    clicks: Optional[int] = 0
-    shares: Optional[int] = 0
-    likes: Optional[int] = 0
-    comments: Optional[int] = 0
-    link: Optional[str] = None
 
-class TrendingTopicSuggestionDTO(BaseModel):
-    topic_name: str
-    source: str
-    relevance_reason: str
-    url: Optional[str] = None
-    status: Optional[str] = "NEW"
+class PautaManualRequest(BaseModel):
+    """Modelo para a requisição de criação de uma pauta manual."""
 
-class LogRequestDTO(BaseModel):
-    reportId: str
-    level: str
-    action: str
-    details: Dict[str, object]
-    timestamp: str
+    title: str = Field(..., min_length=3, description="O tema do artigo a ser gerado.")
+    source_url: str = Field(..., description="A URL de fonte para a pauta manual.")
+
+
+class ScrapeURLRequest(BaseModel):
+    """Modelo para a requisição de scraping de uma URL."""
+
+    url: str = Field(..., description="A URL da qual o conteúdo deve ser extraído.")
+
+
+class CuratedContentRequest(BaseModel):
+    """Modelo para a requisição de atualização de uma pauta com o conteúdo curado."""
+
+    curated_content: str = Field(
+        ..., description="O texto bruto, limpo e editado pelo usuário."
+    )
+
+
+class PautaResponse(BaseModel):
+    """Modelo para a resposta ao retornar uma pauta para o frontend."""
+
+    id: int
+    title: str
+    source_urls: Optional[str] = None
+    relevance_reason: Optional[str] = None
+    status: str
+    origin: str
+    created_at: datetime
+
+    class Config:
+        orm_mode = True  # Permite que o Pydantic leia dados de um objeto SQLAlchemy
