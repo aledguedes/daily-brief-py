@@ -5,6 +5,7 @@ import os
 import json
 from datetime import datetime, timezone
 import time
+from typing import Optional
 import uuid
 
 from src.config import Config
@@ -14,35 +15,38 @@ from src.api import (
     send_post,
     send_logs_to_backend,
     generate_content_with_gemini_service,
-)  # Importar generate_content_with_gemini_service
+)
 from src.scraping import scrape_sources
-from src.content import (
-    determine_content_type,
-)  # generate_content será substituído por generate_content_with_gemini_service
+from src.content import determine_content_type
 from src.utils import save_report, save_payload_to_file
 
-logger = logging.getLogger(__name__)
+import src.database_service as db_service
 
-# REMOVIDO: theme_cache - Não há mais cache de temas.
+logger = logging.getLogger(__name__)
 
 
 async def process_theme(
     theme_config,
     headers,
     existing_titles,
+    user_id: str,
+    task_id: str,
     output_format_override=None,
     return_raw_material_only: bool = False,
 ):
     """
     Processa um único tema: coleta material e, opcionalmente, gera conteúdo e prepara posts para envio.
-    Se return_raw_material_only for True, retorna apenas o material bruto e URLs.
+    Se return_raw_material_only for True, salva o material bruto no DB e não prossegue para geração automática.
     """
     tema = theme_config.get("tema")
     if not tema:
         logger.error("Configuração de tema inválida: 'tema' não encontrado.")
-        return None  # Retorna None ou um indicador de falha
+        db_service.update_material_status(user_id, task_id, "FAILED")
+        return None
 
-    logger.info(f"Iniciando processamento para o tema: '{tema}'")
+    logger.info(
+        f"Iniciando processamento para o tema: '{tema}' (Task ID: {task_id}, User ID: {user_id})"
+    )
 
     # 1. Coleta de Material
     compiled_raw_material, source_urls = await scrape_sources(tema)
@@ -54,33 +58,47 @@ async def process_theme(
         logger.warning(
             f"Não foi possível coletar material bruto suficiente para o tema '{tema}'. Pulando geração de conteúdo."
         )
-        return None  # Retorna None ou um indicador de falha
+        db_service.update_material_status(user_id, task_id, "FAILED_NO_MATERIAL")
+        return None
 
-    # Se a intenção é apenas retornar o material bruto, faz isso aqui
+    # Determinar tipo de conteúdo (mesmo que não vá gerar agora, para salvar no DB)
+    content_type = (
+        output_format_override
+        if output_format_override
+        else determine_content_type(theme_config)
+    )
+
+    # Salva o material bruto no DB com status 'RAW_COLLECTED'
+    db_service.save_material(
+        user_id=user_id,
+        task_id=task_id,
+        theme=tema,
+        raw_material=compiled_raw_material,
+        source_urls=source_urls,
+        content_type=content_type,
+        status="RAW_COLLECTED",
+    )
+    logger.info(
+        f"Material bruto para task_id '{task_id}' salvo no DB com status 'RAW_COLLECTED'."
+    )
+
+    # Se a intenção é apenas coletar e salvar o material bruto, termina aqui
     if return_raw_material_only:
-        logger.info(f"Retornando apenas material bruto para o tema '{tema}'.")
-        return {
-            "theme": tema,
-            "raw_material": compiled_raw_material,
-            "source_urls": source_urls,
-            "content_type": (
-                output_format_override
-                if output_format_override
-                else determine_content_type(theme_config)
-            ),
-        }
+        logger.info(
+            f"Processamento para o tema '{tema}' (Task ID: {task_id}) concluído. Material bruto salvo no DB."
+        )
+        return {"task_id": task_id, "status": "RAW_COLLECTED"}
 
     # --- Fluxo de Geração Automática (se return_raw_material_only for False) ---
+    # Este bloco só será executado se a automação completa for acionada (via /trigger, não /trigger-by-id)
     posts_for_theme = []
     post_start_time = time.time()
 
     try:
-        # 2. Determinar Tipo de Conteúdo
-        content_type = (
-            output_format_override
-            if output_format_override
-            else determine_content_type(theme_config)
-        )
+        # Atualiza o status no DB para 'GENERATING'
+        db_service.update_material_status(user_id, task_id, "GENERATING")
+        logger.info(f"Atualizado status para 'GENERATING' para task_id '{task_id}'.")
+
         if content_type not in ["summary", "article", "social", "informative"]:
             logger.warning(
                 f"Tipo de conteúdo inválido '{content_type}' para o tema '{tema}'. Usando 'summary'."
@@ -103,7 +121,16 @@ async def process_theme(
             logger.error(
                 f"Falha na geração ou parsing do conteúdo do Gemini para '{tema}' ({content_type}). Conteúdo gerado: {generated_content_data}"
             )
+            db_service.update_material_status(user_id, task_id, "FAILED_GENERATION")
             return None
+
+        # Atualiza o status no DB para 'GENERATED' e salva o conteúdo gerado
+        db_service.update_material_status(
+            user_id, task_id, "GENERATED", generated_content_data
+        )
+        logger.info(
+            f"Conteúdo gerado para task_id '{task_id}' salvo no DB com status 'GENERATED'."
+        )
 
         # 4. Verificar Duplicidade (Apenas para o tipo principal, não social, e antes de preparar o post)
         title_pt = generated_content_data.get("title", {}).get("PT", "")
@@ -203,6 +230,7 @@ async def process_theme(
             f"Erro inesperado durante o processamento do tema '{tema}': {str(e)}",
             exc_info=True,
         )
+        db_service.update_material_status(user_id, task_id, "FAILED")
         raise
 
 
@@ -210,12 +238,14 @@ async def main(
     output_format=None,
     theme=None,
     auth_headers=None,
+    user_id: str = "anonymous",
+    task_id: Optional[str] = None,
     return_prepared_material_only: bool = False,
 ):
     """
     Função principal da automação: orquestra a busca, geração e envio de posts.
     Espera que o 'theme' seja fornecido via parâmetro (do AutomationRequest ou CLI).
-    Se return_prepared_material_only for True, retorna o material bruto preparado para o frontend.
+    Se return_prepared_material_only for True, apenas coleta material bruto e salva no DB.
     """
     report_lines = [
         f"Relatório de Execução - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ({datetime.now().astimezone().tzinfo})\n"
@@ -223,12 +253,11 @@ async def main(
     metrics = {"created": 0, "failed": 0, "categories": {}, "retries": 0}
     start_time = time.time()
 
-    all_prepared_materials = (
-        []
-    )  # Para coletar o material bruto se return_prepared_material_only for True
+    if not task_id:
+        task_id = str(uuid.uuid4())
+        logger.info(f"Novo task_id gerado: {task_id}")
 
     try:
-        # 1. Autenticar no Backend (ou usar headers passados)
         if auth_headers:
             headers = auth_headers
             logger.info("Usando headers de autenticação passados para a automação.")
@@ -237,29 +266,23 @@ async def main(
             headers = Auth.authenticate()
             logger.info("Autenticação no backend bem-sucedida.")
 
-        # 2. Preparar Temas para Processar
         themes_to_process = []
         if theme:
-            # Se um tema específico foi fornecido (do AutomationRequest ou CLI), use-o.
             themes_to_process.append(
                 {
                     "tema": theme,
-                    "categoria": "Específico",  # Default se não vier de um objeto completo
-                    "tipo": (
-                        output_format if output_format else "informative"
-                    ),  # Default se não vier de um objeto completo
-                    "generateSocial": True,  # Assumimos que queremos gerar social para temas específicos
+                    "categoria": "Específico",
+                    "tipo": output_format if output_format else "informative",
+                    "generateSocial": True,
                 }
             )
             logger.info(f"Processando tema específico: '{theme}'")
         else:
-            # Se nenhum tema foi fornecido, a automação não tem o que processar.
             error_msg = "[ERRO] Nenhum tema para processar. O tema deve ser fornecido via AutomationRequest ou CLI."
             report_lines.append(error_msg)
             logger.error(error_msg)
-            raise ValueError(
-                "Nenhum tema para processar."
-            )  # Levanta erro para interromper a automação
+            db_service.update_material_status(user_id, task_id, "FAILED_NO_THEME")
+            raise ValueError("Nenhum tema para processar.")
 
         max_themes_per_run = int(os.getenv("MAX_THEMES_PER_RUN", 5))
         if len(themes_to_process) > max_themes_per_run:
@@ -268,11 +291,8 @@ async def main(
             )
             themes_to_process = themes_to_process[:max_themes_per_run]
 
-        # 3. Buscar Posts Existentes (para verificar duplicados)
         existing_titles = []
-        if (
-            not return_prepared_material_only
-        ):  # Só busca posts existentes se for gerar conteúdo
+        if not return_prepared_material_only:
             logger.info(
                 "Buscando posts existentes no backend para verificar duplicados..."
             )
@@ -283,28 +303,20 @@ async def main(
 
         all_posts_to_send = []
 
-        # 4. Processar Cada Tema
         for theme_config in themes_to_process:
             try:
                 result_from_process_theme = await process_theme(
                     theme_config,
                     headers,
                     existing_titles,
+                    user_id,
+                    task_id,
                     output_format,
                     return_raw_material_only=return_prepared_material_only,
                 )
 
-                if return_prepared_material_only:
+                if not return_prepared_material_only:
                     if result_from_process_theme:
-                        all_prepared_materials.append(result_from_process_theme)
-                    else:
-                        logger.warning(
-                            f"Processamento de tema '{theme_config.get('tema', 'Desconhecido')}' para material bruto falhou ou não retornou material."
-                        )
-                else:
-                    if (
-                        result_from_process_theme
-                    ):  # Se não for para retornar só material bruto, espera posts
                         all_posts_to_send.extend(result_from_process_theme)
                     else:
                         logger.warning(
@@ -321,15 +333,13 @@ async def main(
                 )
                 metrics["failed"] += 1
 
-        # Se a intenção era apenas retornar o material preparado, faz isso e sai
         if return_prepared_material_only:
             logger.info(
-                f"Finalizando execução de main.py para retornar material bruto preparado. Total de temas com material: {len(all_prepared_materials)}"
+                f"Finalizando execução de main.py para apenas coletar e salvar material bruto. Task ID: {task_id}"
             )
-            return all_prepared_materials
+            return {"task_id": task_id, "status": "RAW_COLLECTED"}
 
         # --- Fluxo de Envio Automático (se return_prepared_material_only for False) ---
-        # 5. Enviar Posts para o Backend Spring Boot (Única persistência)
         logger.info(
             f"Iniciando fase de envio para o backend Spring Boot. {len(all_posts_to_send)} posts para enviar."
         )
@@ -345,17 +355,12 @@ async def main(
 
                 metrics["categories"][tema] = metrics["categories"].get(tema, 0) + 1
 
-                # Salvar payload JSON antes de enviar (útil para depuração)
                 save_payload_to_file(post_data, tema, content_type)
 
                 try:
-                    response = send_post(
-                        post_data, headers
-                    )  # send_post já está em api.py
+                    response = send_post(post_data, headers)
                     response_json = response.json()
-                    post_id_spring = response_json.get(
-                        "id"
-                    )  # ID retornado pelo Spring Boot
+                    post_id_spring = response_json.get("id")
 
                     if post_id_spring:
                         report_lines.append(
@@ -364,7 +369,6 @@ async def main(
                         report_lines.append(f"Fontes usadas: {', '.join(source_urls)}")
                         metrics["created"] += 1
 
-                        # Atualizar link do post social APÓS o envio do post principal
                         if content_type != "social":
                             social_post_item = next(
                                 (
@@ -398,10 +402,10 @@ async def main(
                     )
                     metrics["failed"] += 1
 
-        # 6. Enviar Relatório/Logs para o Backend (Opcional)
         if Config.LOGS_API_URL:
             try:
                 log_report_data = {
+                    "reportId": task_id,
                     "action": "Relatório de Execução da Automação",
                     "timestamp": datetime.now(timezone.utc),
                     "level": "INFO",
@@ -421,7 +425,6 @@ async def main(
                 "LOGS_API_URL não configurada. Pulando envio do relatório para o backend de logs."
             )
 
-        # 7. Finalizar e Salvar Relatório Local
         total_time = time.time() - start_time
         report_lines.append(
             f"\n--- Resumo da Execução ---\nMétricas:\n- Posts criados (Spring Boot): {metrics['created']}\n- Falhas (processamento/envio): {metrics['failed']}\n- Tentativas extras (envio - retries): (Contado internamente na função send_post)\n- Categorias Processadas: {', '.join(f'{k}: {v}' for k, v in metrics['categories'].items()) if metrics['categories'] else 'Nenhuma'}\n- Tempo total: {total_time:.2f}s"
@@ -439,6 +442,7 @@ async def main(
         logger.critical(f"Erro CRÍTICO na automação: {str(e)}", exc_info=True)
         report_lines.append(f"\n[ERRO CRÍTICO] Automação interrompida: {str(e)}")
         save_report(report_lines, is_error=True)
+        db_service.update_material_status(user_id, task_id, "FAILED_CRITICAL")
         raise
 
 
@@ -458,27 +462,33 @@ if __name__ == "__main__":
     parser.add_argument(
         "--raw-material-only",
         action="store_true",
-        help="If set, only prepares raw material and does not generate content with Gemini.",
+        help="If set, only collects raw material and saves to DB, does not generate content with Gemini.",
+    )
+    parser.add_argument(
+        "--user-id", type=str, default="cli_user", help="User ID for CLI execution."
+    )
+    parser.add_argument(
+        "--task-id", type=str, default=None, help="Optional Task ID for CLI execution."
     )
     args = parser.parse_args()
 
     logger.info(
-        f"Rodando script main.py diretamente com output_format='{args.format}', theme='{args.theme}', raw_material_only={args.raw_material_only}."
+        f"Rodando script main.py diretamente com output_format='{args.format}', theme='{args.theme}', raw_material_only={args.raw_material_only}, user_id='{args.user_id}', task_id='{args.task_id}'."
     )
     try:
         result = asyncio.run(
             main(
                 output_format=args.format,
                 theme=args.theme,
+                user_id=args.user_id,
+                task_id=args.task_id,
                 return_prepared_material_only=args.raw_material_only,
             )
         )
         if args.raw_material_only:
-            logger.info("Material bruto preparado:")
-            for item in result:
-                logger.info(
-                    f"  Tema: {item['theme']}, Tamanho Material: {len(item['raw_material'])} chars, URLs: {len(item['source_urls'])}"
-                )
+            logger.info(
+                f"Material bruto preparado e salvo no DB para task_id: {result['task_id']}. Status: {result['status']}"
+            )
         else:
             logger.info("Execução direta de main.py concluída.")
     except Exception as e:
