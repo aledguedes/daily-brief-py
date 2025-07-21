@@ -37,7 +37,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Inicialização do FastAPI
+# Inicialização do FastAPI (mantida aqui para consistência, mas o app principal é em server.py)
+# Esta instância 'app' não será usada diretamente se 'server.py' importar as rotas.
+# No entanto, para fins de modularidade, mantemos a estrutura.
 app = FastAPI()
 
 # --- Configuração da API Gemini ---
@@ -558,6 +560,7 @@ def send_logs_to_backend(log_data, headers=None):
         raise
 
 
+# As funções validate_post e validate_social_post ESTÃO DEFINIDAS AQUI
 def validate_post(post_data):
     """Valida os dados de um post principal contra o esquema definido."""
     try:
@@ -854,8 +857,3 @@ async def generate_content_manual(request_body: GenerateContentManualRequest):
     except Exception as e:
         logger.error(f"Erro no endpoint /generate_content_manual: {e}")
         raise HTTPException(status_code=500, detail=f"Erro na geração de conteúdo: {e}")
-
-
-# Note: O ponto de entrada principal para rodar o FastAPI (uvicorn.run(app, ...))
-# está tipicamente em `src/server.py` no seu projeto DailyBrief.
-# Se você estiver rodando `src/api.py` diretamente para testes, precisaria de um bloco `if __name__ == "__main__":` aqui.
