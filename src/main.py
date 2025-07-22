@@ -68,16 +68,32 @@ async def process_theme(
         else determine_content_type(theme_config)
     )
 
-    # Salva o material bruto no DB com status 'RAW_COLLECTED'
-    db_service.save_material(
-        user_id=user_id,
-        task_id=task_id,
-        theme=tema,
-        raw_material=compiled_raw_material,
-        source_urls=source_urls,
-        content_type=content_type,
-        status="RAW_COLLECTED",
-    )
+    # Atualiza o material bruto no DB com status 'RAW_COLLECTED'
+    conn = db_service.get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            UPDATE materials
+            SET raw_material = ?, source_urls = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ? AND task_id = ?
+            """,
+            (compiled_raw_material, json.dumps(source_urls), user_id, task_id),
+        )
+        conn.commit()
+        logger.info(
+            f"Material bruto e URLs para task_id '{task_id}' atualizados no DB."
+        )
+    except Exception as e:
+        logger.error(
+            f"Erro ao atualizar material bruto e URLs para task_id '{task_id}': {e}",
+            exc_info=True,
+        )
+        db_service.update_material_status(user_id, task_id, "FAILED_UPDATE_RAW")
+    finally:
+        conn.close()
+
+    db_service.update_material_status(user_id, task_id, "RAW_COLLECTED")
     logger.info(
         f"Material bruto para task_id '{task_id}' salvo no DB com status 'RAW_COLLECTED'."
     )
@@ -90,7 +106,6 @@ async def process_theme(
         return {"task_id": task_id, "status": "RAW_COLLECTED"}
 
     # --- Fluxo de Geração Automática (se return_raw_material_only for False) ---
-    # Este bloco só será executado se a automação completa for acionada (via /trigger, não /trigger-by-id)
     posts_for_theme = []
     post_start_time = time.time()
 
@@ -184,26 +199,21 @@ async def process_theme(
                 for field in ["title", "excerpt", "content", "metaDescription"]
             ):
                 social_post_data = {
-                    "title": social_generated_data.get("title", {}),
-                    "content": social_generated_data.get("content", {}),
-                    "excerpt": social_generated_data.get("excerpt", {}),
-                    "metaDescription": social_generated_data.get("metaDescription", {}),
-                    "image": theme_config.get(
+                    "socialTitle": social_generated_data.get("title", {}),
+                    "socialContent": social_generated_data.get("content", {}),
+                    "socialImageUrl": theme_config.get(
                         "image",
                         "https://placehold.co/1200x630/000000/FFFFFF?text=DailyBrief",
                     ),
-                    "author": theme_config.get("author", Config.DEFAULT_AUTHOR),
-                    "tags": theme_config.get("tags", [tema, "DailyBrief", "Automação"])
-                    + ["social"],
-                    "category": theme_config.get("category", "Geral"),
-                    "affiliateLinks": theme_config.get("affiliateLinks", {}),
-                    "status": Config.DEFAULT_STATUS,
-                    "publishedAt": datetime.now(timezone.utc).isoformat(
-                        timespec="microseconds"
-                    )
-                    + "Z",
-                    "readTime": "1 min",
-                    "sources": source_urls,
+                    "socialMediaPlatform": "GENERIC",  # Ou uma plataforma específica se soubermos
+                    "originalPostId": None,  # Será preenchido após o post principal ser salvo
+                    "status": "DRAFT",
+                    "publishedSocialAt": None,
+                    "impressions": 0,
+                    "clicks": 0,
+                    "shares": 0,
+                    "likes": 0,
+                    "comments": 0,
                     "link": "",  # Link será preenchido após o envio do post principal
                 }
                 posts_for_theme.append(
@@ -240,12 +250,12 @@ async def main(
     auth_headers=None,
     user_id: str = "anonymous",
     task_id: Optional[str] = None,
-    return_prepared_material_only: bool = False,
-):
+    return_raw_material_only: bool = False,
+):  # CORREÇÃO AQUI
     """
     Função principal da automação: orquestra a busca, geração e envio de posts.
     Espera que o 'theme' seja fornecido via parâmetro (do AutomationRequest ou CLI).
-    Se return_prepared_material_only for True, apenas coleta material bruto e salva no DB.
+    Se return_raw_material_only for True, apenas coleta material bruto e salva no DB.
     """
     report_lines = [
         f"Relatório de Execução - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ({datetime.now().astimezone().tzinfo})\n"
@@ -292,7 +302,7 @@ async def main(
             themes_to_process = themes_to_process[:max_themes_per_run]
 
         existing_titles = []
-        if not return_prepared_material_only:
+        if not return_raw_material_only:  # CORREÇÃO AQUI
             logger.info(
                 "Buscando posts existentes no backend para verificar duplicados..."
             )
@@ -312,10 +322,10 @@ async def main(
                     user_id,
                     task_id,
                     output_format,
-                    return_raw_material_only=return_prepared_material_only,
+                    return_raw_material_only=return_raw_material_only,  # CORREÇÃO AQUI
                 )
 
-                if not return_prepared_material_only:
+                if not return_raw_material_only:  # CORREÇÃO AQUI
                     if result_from_process_theme:
                         all_posts_to_send.extend(result_from_process_theme)
                     else:
@@ -333,13 +343,13 @@ async def main(
                 )
                 metrics["failed"] += 1
 
-        if return_prepared_material_only:
+        if return_raw_material_only:  # CORREÇÃO AQUI
             logger.info(
                 f"Finalizando execução de main.py para apenas coletar e salvar material bruto. Task ID: {task_id}"
             )
             return {"task_id": task_id, "status": "RAW_COLLECTED"}
 
-        # --- Fluxo de Envio Automático (se return_prepared_material_only for False) ---
+        # --- Fluxo de Envio Automático (se return_raw_material_only for False) ---
         logger.info(
             f"Iniciando fase de envio para o backend Spring Boot. {len(all_posts_to_send)} posts para enviar."
         )
@@ -482,9 +492,9 @@ if __name__ == "__main__":
                 theme=args.theme,
                 user_id=args.user_id,
                 task_id=args.task_id,
-                return_prepared_material_only=args.raw_material_only,
+                return_raw_material_only=args.raw_material_only,
             )
-        )
+        )  # CORREÇÃO AQUI
         if args.raw_material_only:
             logger.info(
                 f"Material bruto preparado e salvo no DB para task_id: {result['task_id']}. Status: {result['status']}"

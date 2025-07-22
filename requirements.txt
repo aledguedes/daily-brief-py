@@ -1,3 +1,5 @@
+#requirements.txt
+
 sqlalchemy
 psycopg2-binary
 requests

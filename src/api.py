@@ -28,6 +28,7 @@ from src.scraping_service import (
     save_selector_data,
 )
 
+# IMPORTAÇÃO CORRETA DO SERVIÇO DE BANCO DE DADOS
 import src.database_service as db_service
 
 logger = logging.getLogger(__name__)
@@ -222,7 +223,56 @@ def clean_post_payload(
     return cleaned_data
 
 
+# FUNÇÃO send_post DEFINIDA AQUI
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+def send_post(post_data, headers):
+    url = Config.API_URL
+    logger.info(f"Iniciando envio de post principal para o backend em: {url}")
+    cleaned_post_data = clean_post_payload(post_data, is_social=False)
+    try:
+        validate_post(cleaned_post_data)
+        logger.debug("Payload validado com sucesso contra o esquema de post.")
+        response = requests.post(
+            url, json=cleaned_post_data, headers=headers, timeout=Config.REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+        logger.info(
+            f"Post principal enviado com sucesso para {url}. Status: {response.status_code}"
+        )
+        return response
+    except ValidationError as e:
+        logger.error(
+            f"Erro de validação do esquema do post principal antes de enviar: {str(e)}. Payload: {json.dumps(cleaned_post_data, ensure_ascii=False)}",
+            exc_info=True,
+        )
+        raise ValueError(f"Erro de validação do esquema do post: {e.message}") from e
+    except requests.exceptions.Timeout:
+        logger.error(
+            f"Timeout ao enviar post principal para {url}. Tentando novamente...",
+            exc_info=True,
+        )
+        raise
+    except requests.exceptions.RequestException as e:
+        logger.error(
+            f"Erro HTTP/Requisição ao enviar post principal para {url}: {str(e)}. Tentando novamente...",
+            exc_info=True,
+        )
+        if hasattr(e, "response") and e.response is not None:
+            logger.error(
+                f"Resposta de erro do backend: Status {e.response.status_code}, Corpo: {e.response.text}"
+            )
+        raise
+    except Exception as e:
+        logger.error(
+            f"Erro inesperado ao enviar post principal para {url}: {str(e)}",
+            exc_info=True,
+        )
+        raise
+
+
+# FUNÇÃO validate_post DEFINIDA AQUI
 def validate_post(post_data):
+    """Valida os dados de um post principal contra o esquema definido."""
     try:
         jsonschema.validate(instance=post_data, schema=post_schema)
         logger.debug("Validação do post principal bem-sucedida.")
@@ -240,7 +290,9 @@ def validate_post(post_data):
         raise
 
 
+# FUNÇÃO validate_social_post DEFINIDA AQUI
 def validate_social_post(post_data):
+    """Valida os dados de um post social contra o esquema definido."""
     try:
         jsonschema.validate(instance=post_data, schema=social_schema)
         logger.debug("Validação do post social bem-sucedida.")
@@ -257,7 +309,7 @@ def validate_social_post(post_data):
         raise
 
 
-# --- FUNÇÕES DE COMUNICAÇÃO COM O BACKEND ORIGINAIS (MANTIDAS) ---
+# --- OUTRAS FUNÇÕES DE COMUNICAÇÃO COM O BACKEND ORIGINAIS (MANTIDAS) ---
 def get_existing_posts(headers):
     url = Config.API_URL
     logger.info(f"Buscando posts existentes em: {url}")
@@ -307,52 +359,6 @@ def get_existing_posts(headers):
             exc_info=True,
         )
         return []
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def send_post(post_data, headers):
-    url = Config.API_URL
-    logger.info(f"Iniciando envio de post principal para o backend em: {url}")
-    cleaned_post_data = clean_post_payload(post_data, is_social=False)
-    try:
-        validate_post(cleaned_post_data)
-        logger.debug("Payload validado com sucesso contra o esquema de post.")
-        response = requests.post(
-            url, json=cleaned_post_data, headers=headers, timeout=Config.REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        logger.info(
-            f"Post principal enviado com sucesso para {url}. Status: {response.status_code}"
-        )
-        return response
-    except ValidationError as e:
-        logger.error(
-            f"Erro de validação do esquema do post principal antes de enviar: {str(e)}. Payload: {json.dumps(cleaned_post_data, ensure_ascii=False)}",
-            exc_info=True,
-        )
-        raise ValueError(f"Erro de validação do esquema do post: {e.message}") from e
-    except requests.exceptions.Timeout:
-        logger.error(
-            f"Timeout ao enviar post principal para {url}. Tentando novamente...",
-            exc_info=True,
-        )
-        raise
-    except requests.exceptions.RequestException as e:
-        logger.error(
-            f"Erro HTTP/Requisição ao enviar post principal para {url}: {str(e)}. Tentando novamente...",
-            exc_info=True,
-        )
-        if hasattr(e, "response") and e.response is not None:
-            logger.error(
-                f"Resposta de erro do backend: Status {e.response.status_code}, Corpo: {e.response.text}"
-            )
-        raise
-    except Exception as e:
-        logger.error(
-            f"Erro inesperado ao enviar post principal para {url}: {str(e)}",
-            exc_info=True,
-        )
-        raise
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
@@ -692,7 +698,7 @@ class SubmitFinalPostRequest(BaseModel):
     tags: List[str]
     category: Optional[str] = None
     affiliateLinks: Optional[Dict[str, str]] = None
-    status: str  # Ex: "APPROVED"
+    status: str
     publishedAt: Optional[datetime] = None
     readTime: Optional[str] = None
     task_id_to_delete: Optional[str] = None  # Para deletar o rascunho do SQLite
@@ -738,7 +744,7 @@ async def extract_content(request_body: ExtractRequest):
                 }
             )
         else:
-            processed_items.append(item)  # Pass error messages through
+            processed_items.append(item)
     return {"extracted_contents": processed_items}
 
 
@@ -786,7 +792,6 @@ async def paste_material(request_body: PasteContentRequest):
 async def generate_content_manual_async(
     request_body: GenerateContentManualRequest,
     background_tasks: BackgroundTasks,
-    # user: dict = Depends(verify_token) # Assumindo que user_id virá do frontend ou de um token já validado
 ):
     """
     Aciona a geração de conteúdo usando Gemini em segundo plano com material fornecido pelo usuário.
@@ -795,21 +800,18 @@ async def generate_content_manual_async(
     user_id = request_body.user_id
     task_id = request_body.task_id if request_body.task_id else str(uuid.uuid4())
 
-    # Atualiza o status no DB para 'GENERATING' (ou cria se for nova tarefa de geração)
-    # Se o material bruto já existe, ele será atualizado. Se não, um novo registro é criado.
     existing_material = db_service.get_material(user_id, task_id)
     if existing_material:
         db_service.update_material_status(
             user_id=user_id, task_id=task_id, status="GENERATING"
         )
     else:
-        # Se não existe, cria um novo registro com o material bruto fornecido
         db_service.save_material(
             user_id=user_id,
             task_id=task_id,
             theme=request_body.theme,
             raw_material=request_body.raw_material,
-            source_urls=[],  # Não temos as URLs aqui, pois o material é "final" do frontend
+            source_urls=[],
             content_type=request_body.content_type,
             status="GENERATING",
         )
@@ -903,22 +905,17 @@ async def submit_final_post(
 
     headers = {"Authorization": f"Bearer {user['token']}"}
 
-    # Converte o modelo Pydantic para um dicionário, excluindo campos não definidos
     post_data_for_pg = request_body.dict(exclude_unset=True)
 
-    # Remove task_id_to_delete antes de enviar para o PostgreSQL
     task_id_to_delete = post_data_for_pg.pop("task_id_to_delete", None)
 
     try:
-        # Envia para o PostgreSQL via função send_post existente
+        # CHAMA A FUNÇÃO send_post DEFINIDA NESTE MESMO ARQUIVO
         response = send_post(post_data_for_pg, headers)
-        response.raise_for_status()  # Levanta HTTPError para respostas de erro (4xx ou 5xx)
+        response.raise_for_status()
 
-        # Se o envio para o PostgreSQL for bem-sucedido, deleta do SQLite
         if task_id_to_delete:
-            user_id = user["payload"].get(
-                "sub", "anonymous_user"
-            )  # Obter user_id do token
+            user_id = user["payload"].get("sub", "anonymous_user")
             if db_service.delete_material(user_id, task_id_to_delete):
                 logger.info(
                     f"Material temporário com task_id '{task_id_to_delete}' deletado do SQLite."

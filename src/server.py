@@ -27,54 +27,17 @@ from src.main import main as run_automation
 from src.config import Config
 from src.database import get_db
 from src.models import AutomationRequest
-from src.api import (
-    send_logs_to_backend,
-    MaterialResponse,
-    SubmitFinalPostRequest,
-)  # Importar SubmitFinalPostRequest
+from src.api import send_logs_to_backend, MaterialResponse, SubmitFinalPostRequest
 from src.auth import Auth  # Importar Auth para usar Auth.verify_token
-import src.database_service as db_service
+import src.database_service as db_service  # Importação adicionada para db_service
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 security = HTTPBearer()
 
-# JWT_SECRET_BASE64 e ALGORITHM agora são gerenciados pela classe Config
-# JWT_SECRET é acessado via Config.JWT_SECRET_KEY
-
-
-# A dependência verify_token agora usa Auth.verify_token
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Dependência para verificar o token JWT nos headers usando Auth.verify_token."""
-    token = credentials.credentials
-    try:
-        # Auth.verify_token deve retornar o payload decodificado se válido
-        payload = Auth.verify_token(token)
-        logger.info(f"Token verificado com sucesso. Payload: {payload}")
-        return {"payload": payload, "token": token}
-    except jwt.ExpiredSignatureError:
-        logger.warning("Token JWT expirado.")
-        raise HTTPException(status_code=401, detail="Token expirado")
-    except jwt.InvalidTokenError as e:
-        logger.error(f"Token JWT inválido: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=401, detail=f"Token inválido: {str(e)}")
-    except Exception as e:
-        logger.error(f"Erro inesperado ao verificar token: {str(e)}", exc_info=True)
-        if Config.LOGS_API_URL:
-            try:
-                log_data = {
-                    "action": f"Erro interno ao verificar token: {str(e)}",
-                    "timestamp": datetime.now(timezone.utc),
-                    "level": "ERROR",
-                }
-                send_logs_to_backend(log_data)
-            except Exception as log_err:
-                logger.error(
-                    f"Erro ao enviar log de erro de token para o backend: {str(log_err)}",
-                    exc_info=True,
-                )
-        raise HTTPException(status_code=500, detail="Erro interno ao verificar token")
+# JWT_SECRET_BASE64 e ALGORITHM agora são gerenciados pela classe Auth
+# Remove a decodificação direta aqui, pois Auth.verify_token fará isso.
 
 
 class TriggerRequest(BaseModel):
@@ -83,16 +46,43 @@ class TriggerRequest(BaseModel):
 
 
 class TriggerResponse(BaseModel):
+    # Adicionado o campo trigger_id
+    trigger_id: int
     message: str
     task_id: str
     status: str
 
 
+# A função verify_token do server.py foi removida e sua lógica movida para Auth.verify_token
+# Agora, as dependências usarão diretamente Auth.verify_token
+
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Evento de startup para inicializar o banco de dados SQLite.
+    """
+    logger.info("Executando evento de startup: Inicializando banco de dados SQLite...")
+    try:
+        db_service.init_db()
+        logger.info("Banco de dados SQLite inicializado com sucesso no startup.")
+    except Exception as e:
+        logger.critical(
+            f"Erro CRÍTICO ao inicializar o banco de dados SQLite no startup: {e}",
+            exc_info=True,
+        )
+        # Dependendo da sua estratégia de erro, você pode querer levantar a exceção
+        # para impedir o início do servidor se o DB for essencial.
+        raise
+
+
 @app.get("/trigger-by-id/{id}", response_model=TriggerResponse)
 async def trigger_by_id(
-    id: int,
+    id: int,  # Este é o trigger_id
     background_tasks: BackgroundTasks,
-    user: dict = Depends(verify_token),
+    user_payload: dict = Depends(
+        Auth.verify_token
+    ),  # Usar Auth.verify_token diretamente
     db: Session = Depends(get_db),
 ):
     """
@@ -101,10 +91,10 @@ async def trigger_by_id(
     Retorna imediatamente um task_id para consulta de status.
     """
     logger.info(
-        f"Endpoint /trigger-by-id/{id} acionado pelo usuário: {user['payload'].get('sub', 'Desconhecido')} para coletar material bruto."
+        f"Endpoint /trigger-by-id/{id} acionado pelo usuário: {user_payload.get('sub', 'Desconhecido')} para coletar material bruto."
     )
 
-    user_id = user["payload"].get("sub", "anonymous_user")
+    user_id = user_payload.get("sub", "anonymous_user")
     task_id = str(uuid.uuid4())
 
     try:
@@ -139,7 +129,6 @@ async def trigger_by_id(
             f"Parâmetros do DB para ID {id}: output_format='{output_format}', theme='{theme}'"
         )
 
-        # Salva um registro inicial no DB para a tarefa (status PENDING_COLLECTION)
         db_service.save_material(
             user_id=user_id,
             task_id=task_id,
@@ -157,16 +146,19 @@ async def trigger_by_id(
             run_automation,
             output_format=output_format,
             theme=theme,
-            auth_headers={"Authorization": f"Bearer {user['token']}"},
+            auth_headers={
+                "Authorization": f"Bearer {user_payload.get('token')}"
+            },  # Passar o token se necessário para run_automation
             user_id=user_id,
             task_id=task_id,
-            return_prepared_material_only=True,
+            return_raw_material_only=True,
         )
 
         logger.info(
             f"Coleta de material para ID {id} iniciada em segundo plano. Task ID: {task_id}"
         )
         return TriggerResponse(
+            trigger_id=id,  # Adicionado o trigger_id aqui
             message="Coleta de material iniciada em segundo plano. Consulte o status usando o task_id.",
             task_id=task_id,
             status="PENDING_COLLECTION",
@@ -218,7 +210,7 @@ async def trigger_by_id(
 
 @app.post("/trigger")
 async def trigger_automation_post(
-    request_data: TriggerRequest, user: dict = Depends(verify_token)
+    request_data: TriggerRequest, user_payload: dict = Depends(Auth.verify_token)
 ):
     """
     Aciona a automação de geração de posts com base em parâmetros fornecidos no corpo da requisição JSON.
@@ -226,12 +218,12 @@ async def trigger_automation_post(
     Requer um token JWT válido.
     """
     logger.info(
-        f"Endpoint POST /trigger acionado pelo usuário: {user['payload'].get('sub', 'Desconhecido')}"
+        f"Endpoint POST /trigger acionado pelo usuário: {user_payload.get('sub', 'Desconhecido')}"
     )
 
     output_format = request_data.output_format
     theme = request_data.theme
-    user_id = user["payload"].get("sub", "anonymous_user")
+    user_id = user_payload.get("sub", "anonymous_user")
     task_id = str(uuid.uuid4())
 
     try:
@@ -242,10 +234,10 @@ async def trigger_automation_post(
         output_report = await run_automation(
             output_format=output_format,
             theme=theme,
-            auth_headers={"Authorization": f"Bearer {user['token']}"},
+            auth_headers={"Authorization": f"Bearer {user_payload.get('token')}"},
             user_id=user_id,
             task_id=task_id,
-            return_prepared_material_only=False,
+            return_raw_material_only=False,
         )
 
         if not isinstance(output_report, str):
@@ -335,7 +327,6 @@ async def trigger_automation_post(
         )
 
 
-# Endpoint para consultar o status de uma tarefa
 @app.get("/get_task_result/{user_id}/{task_id}", response_model=MaterialResponse)
 async def get_task_result_endpoint(user_id: str, task_id: str):
     """
@@ -349,7 +340,6 @@ async def get_task_result_endpoint(user_id: str, task_id: str):
     return MaterialResponse(**material)
 
 
-# Endpoint para listar todos os materiais de um usuário
 @app.get("/list_user_materials/{user_id}", response_model=List[MaterialResponse])
 async def list_user_materials_endpoint(user_id: str):
     """
@@ -357,6 +347,64 @@ async def list_user_materials_endpoint(user_id: str):
     """
     materials = db_service.list_user_materials(user_id)
     return [MaterialResponse(**m) for m in materials]
+
+
+@app.post("/submit_final_post")
+async def submit_final_post(
+    request_body: SubmitFinalPostRequest,
+    user_payload: dict = Depends(Auth.verify_token),
+):
+    """
+    Recebe o conteúdo final, aprovado pelo usuário, e o envia para o backend PostgreSQL.
+    Opcionalmente, deleta o registro temporário do SQLite.
+    """
+    logger.info(
+        f"Endpoint /submit_final_post acionado pelo usuário: {user_payload.get('sub', 'Desconhecido')}"
+    )
+
+    headers = {"Authorization": f"Bearer {user_payload.get('token')}"}
+
+    post_data_for_pg = request_body.dict(exclude_unset=True)
+
+    task_id_to_delete = post_data_for_pg.pop("task_id_to_delete", None)
+
+    try:
+        from src.api import send_post  # Importação explícita para garantir escopo
+
+        response = send_post(post_data_for_pg, headers)
+        response.raise_for_status()
+
+        if task_id_to_delete:
+            user_id = user_payload.get("sub", "anonymous_user")
+            if db_service.delete_material(user_id, task_id_to_delete):
+                logger.info(
+                    f"Material temporário com task_id '{task_id_to_delete}' deletado do SQLite."
+                )
+            else:
+                logger.warning(
+                    f"Falha ao deletar material temporário com task_id '{task_id_to_delete}' do SQLite."
+                )
+
+        return {
+            "message": "Post final enviado com sucesso para o backend e material temporário limpo (se aplicável).",
+            "status": "SUCCESS",
+        }
+
+    except requests.exceptions.RequestException as e:
+        logger.error(
+            f"Erro ao enviar post final para o backend: {str(e)}", exc_info=True
+        )
+        detail = (
+            f"Erro ao enviar post final: {e.response.text}" if e.response else str(e)
+        )
+        raise HTTPException(
+            status_code=e.response.status_code if e.response else 500, detail=detail
+        )
+    except Exception as e:
+        logger.error(
+            f"Erro inesperado no endpoint /submit_final_post: {str(e)}", exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 
 # Endpoint simples para testar a conexão (mantido)

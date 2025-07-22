@@ -228,5 +228,4 @@ def delete_material(user_id: str, task_id: str) -> bool:
         conn.close()
 
 
-# Inicializa o banco de dados na primeira importação
-init_db()
+# REMOVIDO: init_db()
