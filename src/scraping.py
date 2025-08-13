@@ -2,16 +2,24 @@
 import asyncio
 import logging
 import aiohttp
+from amqp import NotFound
 import asyncpraw
 import asyncprawcore
 import requests
 from asyncprawcore.exceptions import (
     Forbidden as RedditForbidden,
+    TooManyRequests,
 )  # Importar Forbidden especificamente
 from newsapi import NewsApiClient
 from serpapi import GoogleSearch
 from src.config import Config
-from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
+from tenacity import (
+    retry,
+    wait_fixed,
+    wait_random_exponential,
+    stop_after_attempt,
+    retry_if_exception_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,50 +38,41 @@ reddit = asyncpraw.Reddit(
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_fixed(2),
-    retry=retry_if_exception_type(aiohttp.ClientError),
+    stop=stop_after_attempt(5),
+    wait=wait_random_exponential(min=1, max=60),
+    retry=retry_if_exception_type(TooManyRequests),
 )
-async def scrape_reddit(query):
+async def scrape_reddit(query: str):
     """
     Busca posts relevantes no Reddit usando a biblioteca asyncpraw.
     Retorna uma lista de dicionários com 'title', 'url' e 'content'.
     """
     logger.info(f"Buscando posts do Reddit para: '{query}'")
     results = []
+
+    # Lista de subreddits para buscar, direcionada ao seu nicho
+    # Esta é a lista que você pode ajustar conforme sua necessidade
+    subreddits_to_search = [
+        "programming",
+        "compsci",
+        "technology",
+        "webdev",
+        "gamedev",
+        "sysadmin",
+        "brasil",
+    ]
+
     try:
-        # Busca subreddits relacionados à query
-        # Usamos search_by_name para encontrar subreddits relevantes
-        subreddits = [
-            await reddit.subreddit("technology"),
-            await reddit.subreddit("news"),
-            await reddit.subreddit("worldnews"),
-        ]
+        reddit = await asyncio.create_task(asyncpraw.Reddit())
 
-        # Tenta encontrar um subreddit mais específico se a query for muito direcionada
-        try:
-            # Isso pode levantar um asyncprawcore.exceptions.NotFound se o subreddit não existir
-            search_subreddit = await reddit.subreddit(
-                query.replace(" ", "")
-            )  # Tenta um subreddit com o nome da query
-            subreddits.insert(0, search_subreddit)  # Prioriza o subreddit específico
-        except asyncprawcore.exceptions.NotFound:
-            logger.warning(
-                f"Subreddit '{query.replace(' ', '')}' não encontrado. Usando subreddits gerais."
-            )
-        except Exception as e:
-            logger.warning(
-                f"Erro ao tentar encontrar subreddit específico para '{query}': {e}"
-            )
+        for subreddit_name in subreddits_to_search:
+            try:
+                subreddit = await reddit.subreddit(subreddit_name)
+                logger.debug(f"Buscando em r/{subreddit.display_name} por '{query}'")
 
-        for subreddit in subreddits:
-            logger.debug(f"Buscando em r/{subreddit.display_name} para '{query}'")
-            async for submission in subreddit.hot(
-                limit=20
-            ):  # Aumentado limite para ter mais material
-                if (
-                    query.lower() in submission.title.lower()
-                    or query.lower() in submission.selftext.lower()
+                # Usar o método search() do Reddit para resultados mais precisos
+                async for submission in subreddit.search(
+                    query=query, sort="relevance", limit=10
                 ):
                     results.append(
                         {
@@ -83,23 +82,32 @@ async def scrape_reddit(query):
                                 submission.selftext
                                 if submission.selftext
                                 else submission.title
-                            ),  # Usar selftext se existir, senão o título
+                            ),
                         }
                     )
-                    if (
-                        len(results) >= 10
-                    ):  # Limitar a 10 resultados por fonte para não sobrecarregar
-                        break
-            if len(results) >= 10:
-                break  # Se já temos 10 de qualquer subreddit, paramos
+
+                # Se já temos 10 resultados, podemos parar de buscar em outros subreddits
+                if len(results) >= 10:
+                    break
+
+            except NotFound:
+                logger.warning(
+                    f"Subreddit 'r/{subreddit_name}' não encontrado. Pulando para o próximo."
+                )
+                continue  # Continua para o próximo subreddit na lista
+            except Exception as e:
+                logger.error(
+                    f"Erro inesperado ao buscar posts no r/{subreddit_name}: {e}"
+                )
 
         logger.info(f"Encontrados {len(results)} resultados do Reddit para '{query}'.")
         return results
-    except RedditForbidden as e:  # Captura o erro 403 especificamente
+
+    except RedditForbidden as e:
         logger.error(
-            f"Erro ao buscar posts do Reddit para '{query}': {e}. Verifique suas credenciais REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET e REDDIT_USER_AGENT."
+            f"Erro ao buscar posts do Reddit: {e}. Verifique suas credenciais REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET e REDDIT_USER_AGENT."
         )
-        return []  # Retorna lista vazia em caso de 403
+        return []
     except Exception as e:
         logger.error(
             f"Erro inesperado ao buscar posts do Reddit para '{query}': {e}",

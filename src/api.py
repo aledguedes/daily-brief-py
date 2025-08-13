@@ -5,10 +5,12 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
+import asyncio
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
-from pydantic import BaseModel, HttpUrl
-from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, HttpUrl, Field, ValidationError
+from typing import List, Optional, Dict, Any, Union
 
 import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
@@ -17,9 +19,7 @@ import os
 
 from src.config import Config
 from src.auth import Auth
-import jsonschema
-from jsonschema import ValidationError
-
+import src.database_service as db_service
 from src.scraping_service import (
     fetch_url_content,
     extract_content_by_selectors,
@@ -27,13 +27,16 @@ from src.scraping_service import (
     clean_html_content,
     save_selector_data,
 )
+from src.database import get_db
+from src.models import AutomationRequest
+from sqlalchemy.orm import Session
 
-# IMPORTAÇÃO CORRETA DO SERVIÇO DE BANCO DE DADOS
-import src.database_service as db_service
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+# --- Crie uma instância de APIRouter ---
+# Este é o roteador que será incluído na aplicação FastAPI principal em src/server.py
+router = APIRouter()
 
 # --- Configuração da API Gemini ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -43,34 +46,26 @@ if not GEMINI_API_KEY:
     )
 genai.configure(api_key=GEMINI_API_KEY)
 
-# --- ESQUEMAS DE DADOS ORIGINAIS (DO SEU ARQUIVO RESUMO DAILY-PY - DEV.TXT) ---
-post_schema = {
+# --- ESQUEMAS DE DADOS E MODELOS PYDANTIC ---
+# Esquema para o formato de saída do Gemini
+GEMINI_OUTPUT_SCHEMA = {
     "type": "object",
-    "required": ["title", "excerpt", "content", "metaDescription"],
     "properties": {
         "title": {
             "type": "object",
-            "required": ["PT", "EN", "ES"],
             "properties": {
                 "PT": {"type": "string"},
                 "EN": {"type": "string"},
                 "ES": {"type": "string"},
             },
-            "additionalProperties": False,
-            "minProperties": 3,
-            "maxProperties": 3,
         },
         "excerpt": {
             "type": "object",
-            "required": ["PT", "EN", "ES"],
             "properties": {
                 "PT": {"type": "string"},
                 "EN": {"type": "string"},
                 "ES": {"type": "string"},
             },
-            "additionalProperties": False,
-            "minProperties": 3,
-            "maxProperties": 3,
         },
         "content": {
             "type": "object",
@@ -79,12 +74,7 @@ post_schema = {
                 "EN": {"type": "string"},
                 "ES": {"type": "string"},
             },
-            "required": ["PT", "EN", "ES"],
         },
-        "image": {"type": ["string", "null"]},
-        "author": {"type": "string"},
-        "tags": {"type": "array", "items": {"type": "string"}},
-        "category": {"type": ["string", "null"]},
         "metaDescription": {
             "type": "object",
             "properties": {
@@ -92,530 +82,306 @@ post_schema = {
                 "EN": {"type": "string"},
                 "ES": {"type": "string"},
             },
-            "required": ["PT", "EN", "ES"],
         },
-        "affiliateLinks": {
-            "type": "object",
-            "patternProperties": {".*": {"type": "string"}},
-            "additionalProperties": True,
+        "tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Tags relevantes para o artigo",
         },
-        "status": {"type": "string", "enum": ["PENDING", "APPROVED", "REJECTED"]},
-        "publishedAt": {"type": ["string", "null"], "format": "date-time"},
-        "readTime": {"type": ["string", "null"]},
-    },
-    "additionalProperties": False,
-}
-
-social_schema = {
-    "type": "object",
-    "required": ["socialTitle", "socialContent", "originalPostId"],
-    "properties": {
-        "socialTitle": {
-            "type": "object",
-            "required": ["PT", "EN", "ES"],
-            "properties": {
-                "PT": {"type": "string"},
-                "EN": {"type": "string"},
-                "ES": {"type": "string"},
-            },
-            "additionalProperties": False,
-            "minProperties": 3,
-            "maxProperties": 3,
-        },
-        "socialContent": {
-            "type": "object",
-            "required": ["PT", "EN", "ES"],
-            "properties": {
-                "PT": {"type": "string"},
-                "EN": {"type": "string"},
-                "ES": {"type": "string"},
-            },
-            "additionalProperties": False,
-            "minProperties": 3,
-            "maxProperties": 3,
-        },
-        "socialImageUrl": {"type": ["string", "null"]},
-        "socialMediaPlatform": {"type": "string"},
-        "originalPostId": {"type": "integer"},
-        "status": {
+        "category": {
             "type": "string",
-            "enum": ["DRAFT", "SCHEDULED", "PUBLISHED", "FAILED"],
+            "description": "Categoria principal do artigo",
         },
-        "publishedSocialAt": {"type": ["string", "null"], "format": "date-time"},
-        "impressions": {"type": "integer"},
-        "clicks": {"type": "integer"},
-        "shares": {"type": "integer"},
-        "likes": {"type": "integer"},
-        "comments": {"type": "integer"},
-        "link": {"type": ["string", "null"]},
+        "seo_keywords": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Palavras-chave de SEO",
+        },
+        "read_time_minutes": {
+            "type": "number",
+            "description": "Tempo de leitura estimado em minutos",
+        },
+        "suggested_image_prompt": {
+            "type": "string",
+            "description": "Sugestão de prompt para geração de imagem, baseada no conteúdo do artigo.",
+        },
     },
-    "additionalProperties": False,
+    "required": [
+        "title",
+        "excerpt",
+        "content",
+        "metaDescription",
+        "tags",
+        "category",
+        "seo_keywords",
+        "read_time_minutes",
+        "suggested_image_prompt",
+    ],
 }
 
-trending_suggestion_schema = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "topic_name": {"type": "string"},
-            "source": {"type": "string"},
-            "relevance_reason": {"type": "string"},
-            "url": {"type": ["string", "null"]},
-            "status": {"type": "string", "enum": ["NEW", "APPROVED", "REJECTED"]},
-        },
-        "required": ["topic_name", "source", "relevance_reason"],
-    },
-}
-
-EXPECTED_POST_FIELDS = [
-    "title",
-    "excerpt",
-    "content",
-    "image",
-    "author",
-    "tags",
-    "category",
-    "metaDescription",
-    "affiliateLinks",
-    "status",
-    "publishedAt",
-    "readTime",
-]
-
-EXPECTED_SOCIAL_FIELDS = [
-    "socialTitle",
-    "socialContent",
-    "socialImageUrl",
-    "socialMediaPlatform",
-    "originalPostId",
-    "status",
-    "publishedSocialAt",
-    "impressions",
-    "clicks",
-    "shares",
-    "likes",
-    "comments",
-    "link",
-]
-
-EXPECTED_TRENDING_FIELDS = ["topic_name", "source", "relevance_reason", "url", "status"]
-
-
-def clean_post_payload(
-    post_data: dict, is_social: bool = False, is_trending: bool = False
-):
-    expected_fields = (
-        EXPECTED_SOCIAL_FIELDS
-        if is_social
-        else EXPECTED_TRENDING_FIELDS if is_trending else EXPECTED_POST_FIELDS
-    )
-    cleaned_data = {}
-    for field in expected_fields:
-        if field in post_data:
-            cleaned_data[field] = post_data[field]
-
-    logger.debug(
-        f"Payload gerado (completo): {json.dumps(post_data, ensure_ascii=False, indent=2)}"
-    )
-    logger.debug(
-        f"Payload limpo (para envio, {'trending' if is_trending else 'social' if is_social else 'post'}): {json.dumps(cleaned_data, ensure_ascii=False, indent=2)}"
-    )
-    return cleaned_data
-
-
-# FUNÇÃO send_post DEFINIDA AQUI
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def send_post(post_data, headers):
-    url = Config.API_URL
-    logger.info(f"Iniciando envio de post principal para o backend em: {url}")
-    cleaned_post_data = clean_post_payload(post_data, is_social=False)
-    try:
-        validate_post(cleaned_post_data)
-        logger.debug("Payload validado com sucesso contra o esquema de post.")
-        response = requests.post(
-            url, json=cleaned_post_data, headers=headers, timeout=Config.REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        logger.info(
-            f"Post principal enviado com sucesso para {url}. Status: {response.status_code}"
-        )
-        return response
-    except ValidationError as e:
-        logger.error(
-            f"Erro de validação do esquema do post principal antes de enviar: {str(e)}. Payload: {json.dumps(cleaned_post_data, ensure_ascii=False)}",
-            exc_info=True,
-        )
-        raise ValueError(f"Erro de validação do esquema do post: {e.message}") from e
-    except requests.exceptions.Timeout:
-        logger.error(
-            f"Timeout ao enviar post principal para {url}. Tentando novamente...",
-            exc_info=True,
-        )
-        raise
-    except requests.exceptions.RequestException as e:
-        logger.error(
-            f"Erro HTTP/Requisição ao enviar post principal para {url}: {str(e)}. Tentando novamente...",
-            exc_info=True,
-        )
-        if hasattr(e, "response") and e.response is not None:
-            logger.error(
-                f"Resposta de erro do backend: Status {e.response.status_code}, Corpo: {e.response.text}"
-            )
-        raise
-    except Exception as e:
-        logger.error(
-            f"Erro inesperado ao enviar post principal para {url}: {str(e)}",
-            exc_info=True,
-        )
-        raise
-
-
-# FUNÇÃO validate_post DEFINIDA AQUI
-def validate_post(post_data):
-    """Valida os dados de um post principal contra o esquema definido."""
-    try:
-        jsonschema.validate(instance=post_data, schema=post_schema)
-        logger.debug("Validação do post principal bem-sucedida.")
-    except ValidationError as e:
-        logger.error(
-            f"Erro de validação do esquema do post principal: {e.message}",
-            exc_info=True,
-        )
-        raise
-    except Exception as e:
-        logger.error(
-            f"Erro inesperado durante a validação do post principal: {str(e)}",
-            exc_info=True,
-        )
-        raise
-
-
-# FUNÇÃO validate_social_post DEFINIDA AQUI
-def validate_social_post(post_data):
-    """Valida os dados de um post social contra o esquema definido."""
-    try:
-        jsonschema.validate(instance=post_data, schema=social_schema)
-        logger.debug("Validação do post social bem-sucedida.")
-    except ValidationError as e:
-        logger.error(
-            f"Erro de validação do esquema do post social: {e.message}", exc_info=True
-        )
-        raise
-    except Exception as e:
-        logger.error(
-            f"Erro inesperado durante a validação do post social: {str(e)}",
-            exc_info=True,
-        )
-        raise
-
-
-# --- OUTRAS FUNÇÕES DE COMUNICAÇÃO COM O BACKEND ORIGINAIS (MANTIDAS) ---
-def get_existing_posts(headers):
-    url = Config.API_URL
-    logger.info(f"Buscando posts existentes em: {url}")
-    try:
-        response = requests.get(url, headers=headers, timeout=Config.REQUEST_TIMEOUT)
-        response.raise_for_status()
-        response_data = response.json()
-        posts = response_data.get("content", [])
-        if not isinstance(posts, list):
-            logger.error(
-                f"Resposta inesperada ao buscar posts existentes. Esperado lista em 'content', recebido: {type(posts)}. Conteúdo completo: {response_data}"
-            )
-            return []
-        existing_titles_pt = []
-        for post in posts:
-            if (
-                isinstance(post, dict)
-                and "title" in post
-                and isinstance(post["title"], dict)
-            ):
-                title_pt = post["title"].get("PT")
-                if title_pt and isinstance(title_pt, str):
-                    existing_titles_pt.append(title_pt.strip())
-            else:
-                logger.warning(f"Item inválido encontrado na lista de posts: {post}")
-        logger.info(
-            f"Posts existentes recuperados: {len(existing_titles_pt)} títulos em PT."
-        )
-        logger.debug(f"Títulos existentes: {existing_titles_pt}")
-        return existing_titles_pt
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout ao buscar posts existentes em {url}", exc_info=True)
-        return []
-    except requests.exceptions.RequestException as e:
-        logger.error(
-            f"Erro HTTP/Requisição ao buscar posts existentes em {url}: {str(e)}",
-            exc_info=True,
-        )
-        if hasattr(e, "response") and e.response is not None:
-            logger.error(
-                f"Resposta de erro do backend: Status {e.response.status_code}, Corpo: {e.response.text}"
-            )
-        return []
-    except Exception as e:
-        logger.error(
-            f"Erro inesperado ao buscar posts existentes em {url}: {str(e)}",
-            exc_info=True,
-        )
-        return []
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def send_social_post(post_data, headers):
-    if not Config.ENABLE_SOCIAL_API or not Config.SOCIAL_API_URL:
-        logger.warning(
-            "Envio de post social desativado ou URL não configurada. Pulando envio."
-        )
-        return None
-    url = Config.SOCIAL_API_URL
-    logger.info(f"Iniciando envio de post social para o backend em: {url}")
-    cleaned_post_data = clean_post_payload(post_data, is_social=True)
-    try:
-        validate_social_post(cleaned_post_data)
-        logger.debug("Payload validado com sucesso contra o esquema de social.")
-        response = requests.post(
-            url, json=cleaned_post_data, headers=headers, timeout=Config.REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        logger.info(
-            f"Post social enviado com sucesso para {url}. Status: {response.status_code}"
-        )
-        return response
-    except ValidationError as e:
-        logger.error(
-            f"Erro de validação do esquema do post social antes de enviar: {str(e)}. Payload: {json.dumps(cleaned_post_data, ensure_ascii=False)}",
-            exc_info=True,
-        )
-        raise ValueError(
-            f"Erro de validação do esquema do post social: {e.message}"
-        ) from e
-    except requests.exceptions.Timeout:
-        logger.error(
-            f"Timeout ao enviar post social para {url}. Tentando novamente...",
-            exc_info=True,
-        )
-        raise
-    except requests.exceptions.RequestException as e:
-        logger.error(
-            f"Erro HTTP/Requisição ao enviar post social para {url}: {str(e)}. Tentando novamente...",
-            exc_info=True,
-        )
-        if hasattr(e, "response") and e.response is not None:
-            logger.error(
-                f"Resposta de erro do backend: Status {e.response.status_code}, Corpo: {e.response.text}"
-            )
-        raise
-    except Exception as e:
-        logger.error(
-            f"Erro inesperado ao enviar post social para {url}: {str(e)}", exc_info=True
-        )
-        raise
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def send_trending_suggestions_to_backend(suggestions, headers):
-    url = Config.TREND_SUGGESTIONS_API_URL
-    logger.info(f"Enviando sugestões de tendências para o backend em: {url}")
-    cleaned_suggestions = [
-        clean_post_payload(suggestion, is_trending=True) for suggestion in suggestions
-    ]
-    try:
-        jsonschema.validate(
-            instance=cleaned_suggestions, schema=trending_suggestion_schema
-        )
-        logger.debug("Sugestões de tendências validadas com sucesso contra o esquema.")
-        response = requests.post(
-            url,
-            json=cleaned_suggestions,
-            headers=headers,
-            timeout=Config.REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        logger.info(
-            f"Sugestões de tendências enviadas com sucesso para {url}. Status: {response.status_code}"
-        )
-        return response
-    except ValidationError as e:
-        logger.error(
-            f"Erro de validação do esquema das sugestões de tendências: {str(e)}. Payload: {json.dumps(cleaned_suggestions, ensure_ascii=False)}",
-            exc_info=True,
-        )
-        raise ValueError(
-            f"Erro de validação do esquema das sugestões: {e.message}"
-        ) from e
-    except requests.exceptions.Timeout:
-        logger.error(
-            f"Timeout ao enviar sugestões para {url}. Tentando novamente...",
-            exc_info=True,
-        )
-        raise
-    except requests.exceptions.RequestException as e:
-        logger.error(
-            f"Erro HTTP/Requisição ao enviar sugestões para {url}: {str(e)}. Tentando novamente...",
-            exc_info=True,
-        )
-        if hasattr(e, "response") and e.response is not None:
-            logger.error(
-                f"Resposta de erro do backend: Status {e.response.status_code}, Corpo: {e.response.text}"
-            )
-        raise
-    except Exception as e:
-        logger.error(
-            f"Erro inesperado ao enviar sugestões para {url}: {str(e)}", exc_info=True
-        )
-        raise
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def send_logs_to_backend(log_data, headers=None):
-    url = Config.LOGS_API_URL
-    if not url:
-        logger.warning(
-            "LOGS_API_URL não configurada. Pulando envio de logs para o backend."
-        )
-        return
-    logger.info(f"Enviando log para o backend em: {url}")
-    try:
-        if "timestamp" in log_data and isinstance(log_data["timestamp"], datetime):
-            timestamp = log_data["timestamp"].isoformat(timespec="microseconds") + "Z"
-        else:
-            timestamp = (
-                datetime.now(timezone.utc).isoformat(timespec="microseconds") + "Z"
-            )
-        payload = {
-            "reportId": log_data.get("report_id", str(uuid.uuid4())),
-            "level": log_data.get("level", "INFO"),
-            "action": log_data.get("action", "Relatório de Execução"),
-            "timestamp": timestamp,
-            "details": {
-                "summary": log_data.get("report_summary", ""),
-                "metrics": log_data.get("metrics", {}),
-                "duration_seconds": log_data.get("duration_seconds", 0),
-            },
-        }
-        logger.debug(
-            f"Payload de log a enviar: {json.dumps(payload, ensure_ascii=False, indent=2)}"
-        )
-        response = requests.post(
-            url, json=payload, headers=headers, timeout=Config.REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        logger.info(
-            f"Log enviado com sucesso para {url}. Status: {response.status_code}"
-        )
-        return response
-    except requests.exceptions.Timeout:
-        logger.error(
-            f"Timeout ao enviar log para {url}. Tentando novamente...", exc_info=True
-        )
-        raise
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erro HTTP ao enviar log para {url}: {str(e)}", exc_info=True)
-        if e.response is not None:
-            logger.error(
-                f"Resposta do backend: {e.response.status_code}, {e.response.text}"
-            )
-        raise
-    except Exception as e:
-        logger.error(
-            f"Erro inesperado ao enviar log para {url}: {str(e)}", exc_info=True
-        )
-        raise
-
-
-# --- ESQUEMA DE RESPOSTA JSON PARA O GEMINI ---
-gemini_response_schema = {
+# Esquema para o formato de saída do Gemini para "resumo de notícias"
+NEWS_SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {
-        "title": {
-            "type": "object",
-            "properties": {
-                "PT": {"type": "string"},
-                "EN": {"type": "string"},
-                "ES": {"type": "string"},
-            },
-            "required": ["PT", "EN", "ES"],
+        "title": {"type": "string", "description": "Título do resumo de notícias"},
+        "summary": {"type": "string", "description": "Resumo conciso das notícias"},
+        "key_points": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Pontos chave das notícias",
         },
-        "excerpt": {
-            "type": "object",
-            "properties": {
-                "PT": {"type": "string"},
-                "EN": {"type": "string"},
-                "ES": {"type": "string"},
+        "source_references": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "url": {"type": "string"},
+                },
+                "required": ["title", "url"],
             },
-            "required": ["PT", "EN", "ES"],
+            "description": "Referências das fontes das notícias",
         },
-        "content": {
-            "type": "object",
-            "properties": {
-                "PT": {"type": "string"},
-                "EN": {"type": "string"},
-                "ES": {"type": "string"},
-            },
-            "required": ["PT", "EN", "ES"],
+        "category": {
+            "type": "string",
+            "description": "Categoria principal das notícias",
         },
-        "metaDescription": {
-            "type": "object",
-            "properties": {
-                "PT": {"type": "string"},
-                "EN": {"type": "string"},
-                "ES": {"type": "string"},
-            },
-            "required": ["PT", "EN", "ES"],
+        "suggested_image_prompt": {
+            "type": "string",
+            "description": "Sugestão de prompt para geração de imagem, baseada no conteúdo do resumo.",
         },
     },
-    "required": ["title", "excerpt", "content", "metaDescription"],
+    "required": [
+        "title",
+        "summary",
+        "key_points",
+        "source_references",
+        "category",
+        "suggested_image_prompt",
+    ],
 }
 
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_fixed(5),
-    retry=retry_if_exception_type(Exception),
-)
-async def generate_content_with_gemini_service(
-    theme: str, raw_material: str, content_type: str = "summary"
-):
-    """
-    Função que chama a API do Gemini para gerar conteúdo de blog.
-    """
-    model = genai.GenerativeModel("gemini-1.5-flash")
+# Modelos Pydantic para validação de entrada/saída
+class SelectorData(BaseModel):
+    url: HttpUrl
+    parent_selector: Optional[str] = None
+    title_selector: Optional[str] = None
+    content_selector: Optional[str] = None
+    image_selector: Optional[str] = None
 
+
+class GenerateContentManualRequest(BaseModel):
+    user_id: str
+    task_id: str
+    raw_material: str
+    theme: str
+    content_type: str
+    keywords: Optional[List[str]] = None
+    tone: Optional[str] = None
+    cta_instruction: Optional[str] = None
+    article_structure: Optional[List[str]] = None
+    audience: Optional[str] = None
+    ideal_article_example: Optional[str] = None
+
+
+class SubmitFinalPostRequest(BaseModel):
+    task_id_to_delete: Optional[str] = None
+    post_data: Dict[str, Any]
+
+
+class ImageGenerationRequest(BaseModel):
+    prompt: str
+
+
+class ImageGenerationResponse(BaseModel):
+    image_base64: str
+
+
+class AutomationRequestDetails(BaseModel):
+    id: int
+    outputFormat: str
+    theme: str
+    createdAt: datetime
+    updatedAt: datetime
+
+
+class MaterialResponse(BaseModel):
+    user_id: str
+    automation_request_id: Optional[int] = None
+    task_id: str
+    status: str
+    theme: Optional[str] = None
+    content_type: Optional[str] = None
+    raw_material: Optional[Union[str, Dict[str, Any]]] = None
+    generated_content: Optional[Union[str, Dict[str, Any]]] = None
+    suggested_image_prompt: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class TriggerRequest(BaseModel):
+    output_format: str = Config.OUTPUT_FORMAT
+    theme: Optional[str] = None
+
+
+class TriggerResponse(BaseModel):
+    trigger_id: Optional[int] = None
+    message: str
+    task_id: str
+    status: str
+
+
+# --- FUNÇÕES AUXILIARES (NÃO SÃO ENDPOINTS, MAS SÃO USADAS POR ELES) ---
+
+
+def get_gemini_model():
+    """Retorna o modelo Gemini configurado."""
+    return genai.GenerativeModel("gemini-1.5-flash")
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+async def generate_content_with_gemini_service(
+    theme: str,
+    raw_material: str,
+    content_type: str = "summary",
+    keywords: Optional[List[str]] = None,
+    tone: Optional[str] = None,
+    cta_instruction: Optional[str] = None,
+    article_structure: Optional[List[str]] = None,
+    audience: Optional[str] = None,
+    ideal_article_example: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Gera conteúdo usando a API Gemini com base no prompt e tipo de conteúdo.
+    Valida a saída contra o esquema apropriado.
+    """
+    model = get_gemini_model()
     content_instructions = {
-        "summary": "Gere um resumo conciso e informativo, com 3-5 parágrafos, formatado em HTML. Use tags <p> para parágrafos. Inclua um título, excerto e meta descrição.",
-        "article": "Gere um artigo detalhado e aprofundado, com 8-15 parágrafos, formatado em HTML. Use tags <p> para parágrafos e tags <h2>, <h3> para subtítulos. Inclua um título, excerto e meta descrição.",
-        "social": "Gere um post curto e envolvente para redes sociais (máximo 3 parágrafos), formatado em HTML. Use tags <p> para parágrafos. Inclua um título (curto), excerto e meta descrição.",
-        "informative": "Gere um texto informativo, com 5-10 parágrafos, formatado em HTML. Use tags <p> para parágrafos e, se necessário, tags <ul> ou <ol> para listas. Inclua um título, excerto e meta descrição.",
+        "summary": {
+            "description": "Gere um resumo conciso e informativo, com 3-5 parágrafos (aprox. 200-400 palavras). Use tags <p> para parágrafos.",
+            "min_paragraphs": 3,
+            "max_paragraphs": 5,
+            "min_words": 200,
+            "max_words": 400,
+        },
+        "article": {
+            "description": "Gere um artigo detalhado e aprofundado, com 8-15 parágrafos (aprox. 800-1500 palavras). Use tags <p> para parágrafos e tags <h2>, <h3> para subtítulos.",
+            "min_paragraphs": 8,
+            "max_paragraphs": 15,
+            "min_words": 800,
+            "max_words": 1500,
+        },
+        "social": {
+            "description": "Gere um post curto e envolvente para redes sociais (máximo 3 parágrafos, aprox. 100-250 palavras). Use tags <p> para parágrafos.",
+            "min_paragraphs": 1,
+            "max_paragraphs": 3,
+            "min_words": 100,
+            "max_words": 250,
+        },
+        "informative": {
+            "description": "Gere um texto informativo, com 5-10 parágrafos (aprox. 500-800 palavras), mesclando diferentes aspectos do tema. Use tags <p> para parágrafos e, se necessário, tags <ul> ou <ol> para listas.",
+            "min_paragraphs": 5,
+            "max_paragraphs": 10,
+            "min_words": 500,
+            "max_words": 800,
+        },
+        "news_brief": {
+            "description": "Gere uma notícia breve e objetiva, focando nos fatos (quem, o quê, onde, quando, por que). Use 2-4 parágrafos (aprox. 150-300 palavras).",
+            "min_paragraphs": 2,
+            "max_paragraphs": 4,
+            "min_words": 150,
+            "max_words": 300,
+        },
+        "how_to_guide": {
+            "description": "Gere um guia passo a passo detalhado. Use uma introdução, seções com <h2> para cada passo, e listas numeradas (<ol>) para as instruções. Inclua uma conclusão. (Aprox. 700-1200 palavras).",
+            "min_paragraphs": 10,
+            "max_paragraphs": 20,
+            "min_words": 700,
+            "max_words": 1200,
+        },
+        "listicle": {
+            "description": "Gere um artigo em formato de lista (listicle). Inclua uma introdução, 5 a 10 itens de lista com <h2> para cada item, e um breve parágrafo para cada item. Finalize com uma conclusão. (Aprox. 600-1000 palavras).",
+            "min_paragraphs": 8,
+            "max_paragraphs": 15,
+            "min_words": 600,
+            "max_words": 1000,
+        },
     }
-    instruction = content_instructions.get(
+    selected_instruction = content_instructions.get(
         content_type, content_instructions["informative"]
     )
+    base_description = selected_instruction["description"]
 
-    prompt = f"""
-Com base no seguinte material bruto, gere conteúdo para um post de blog sobre '{theme}'.
+    prompt_parts = [
+        f"Com base no seguinte material bruto, gere conteúdo para um post de blog sobre '{theme}'.",
+        "",
+        "Instruções Detalhadas para a Estrutura de Saída (Formato JSON):",
+        "1. O campo 'content' (para PT, EN, ES) DEVE ser formatado como HTML válido, apenas com o conteúdo do artigo. NÃO inclua tags <html>, <head> ou <body>.",
+        "2. NÃO inclua classes CSS, IDs ou estilos inline nas tags HTML.",
+        "3. Os campos 'title', 'excerpt' e 'metaDescription' DEVEM ser texto puro, sem tags HTML.",
+        "4. O campo 'suggestedImagePrompt' DEVE ser um texto puro, conciso e descritivo, ideal para gerar uma imagem que represente visualmente o artigo. Pense em elementos visuais chave do tema e do conteúdo.",
+        "",
+        "Diretrizes de Qualidade e SEO (Otimização para Motores de Busca com foco em monetização via AdSense):",
+        "- O conteúdo deve ser envolvente, natural, fluído e coeso. Evite frases repetitivas ou genéricas.",
+        "- Mantenha um tone de voz consistente e adequado ao público-alvo.",
+        "- Integre as palavras-chave de forma natural ao longo do texto para otimização de SEO.",
+        "- Estruture o conteúdo em parágrafos de tamanho moderado (3-5 frases por parágrafo) para facilitar a inserção de anúncios do AdSense sem quebrar o fluxo de leitura. Evite blocos de texto muito longos ou muito curtos.",
+        "- Se referenciar dados, estudos ou fontes, integre a informação no texto e mencione a fonte (ex: 'Segundo um estudo da Universidade X...', 'Conforme publicado no portal Y...'). Evite incluir URLs brutas diretamente no corpo do 'content'.",
+        "- Crie um conteúdo que naturalmente apresente oportunidades para a futura inserção de links de afiliados (cursos, produtos), sem que você os insira diretamente. Pense em como o texto pode introduzir ou discutir tópicos onde esses links fariam sentido.",
+        "- Otimize o título e a meta descrição para atrair cliques em motores de busca, sendo concisos e relevantes.",
+    ]
 
-Instruções Detalhadas para a Estrutura de Saída:
-1. O campo 'content' (para PT, EN, ES) DEVE ser formatado como HTML válido, apenas com o conteúdo do artigo. NÃO inclua tags <html>, <head> ou <body>.
-2. NÃO inclua classes CSS, IDs ou estilos inline nas tags HTML.
-3. Os campos 'title', 'excerpt' e 'metaDescription' DEVEM ser texto puro, sem tags HTML.
-{instruction}
-O resultado final deve ser um objeto JSON, seguindo o esquema fornecido.
-GARANTA QUE CARACTERES ESPECIAIS E ACENTUADOS SEJAM PRESERVADOS CORRETAMENTE EM UTF-8.
+    if tone:
+        prompt_parts.append(f"- Adote um tone de voz: {tone}.")
+    if keywords:
+        prompt_parts.append(
+            f"- Palavras-chave a serem integradas naturalmente: {', '.join(keywords)}."
+        )
+    if audience:
+        prompt_parts.append(
+            f"- O público-alvo principal deste artigo é: {audience}. Adapte a linguagem e a profundidade para este grupo."
+        )
+    if ideal_article_example:
+        prompt_parts.append(
+            f"- Considere o estilo, tone e estrutura do seguinte exemplo de artigo ideal: {ideal_article_example}"
+        )
+    if article_structure:
+        structure_text = "\n".join([f"  - {item}" for item in article_structure])
+        prompt_parts.append(
+            f"- Estruture o 'content' com base nos seguintes tópicos, usando <h2> para os principais e <h3> para subtópicos, se necessário:\n{structure_text}"
+        )
+    else:
+        prompt_parts.append(f"- {base_description}")
+    if cta_instruction:
+        prompt_parts.append(
+            f"- Inclua uma chamada para ação (Call to Action) no final do 'content': '{cta_instruction}'."
+        )
 
-Material Bruto:
-{raw_material[:30000]} # Aumentar limite para material bruto, Gemini 1.5 Flash suporta mais
-    """
+    prompt_parts.append("")
+    prompt_parts.append(
+        "O resultado final deve ser um objeto JSON, seguindo o esquema fornecido."
+    )
+    prompt_parts.append(
+        "GARANTA QUE CARACTERES ESPECIAIS E ACENTUADOS SEJAM PRESERVADOS CORRETAMENTE EM UTF-8."
+    )
+    prompt_parts.append("")
+    prompt_parts.append("Material Bruto:")
+    prompt_parts.append(raw_material[:30000])
+
+    prompt = "\n".join(prompt_parts)
+    logger.debug(f"Prompt final enviado ao Gemini:\n{prompt}")
 
     try:
         response = await model.generate_content_async(
             prompt,
             generation_config=genai.types.GenerationConfig(
                 response_mime_type="application/json",
-                response_schema=gemini_response_schema,
+                response_schema=GEMINI_OUTPUT_SCHEMA,
                 temperature=0.7,
             ),
         )
+        logger.debug(f"Resposta bruta do Gemini: {response.text}")
         return json.loads(response.text)
     except json.JSONDecodeError as e:
         logger.error(
@@ -632,224 +398,398 @@ Material Bruto:
         )
 
 
-# --- PYDANTIC MODELS PARA OS NOVOS ENDPOINTS ---
-class FetchURLsRequest(BaseModel):
-    urls: List[HttpUrl]
-
-
-class ExtractRequest(BaseModel):
-    url: HttpUrl
-    selectors: List[str]
-
-
-class GetParentSelectorRequest(BaseModel):
-    url: HttpUrl
-    selectors: List[str]
-
-
-class SaveSelectorEntry(BaseModel):
-    url: HttpUrl
-    selector: str = "body"
-    outerHTML_preview: str = ""
-    timestamp: str  # ISO formatted string
-
-
-class SaveSelectorsRequest(BaseModel):
-    entries: List[SaveSelectorEntry]
-
-
-class PasteContentRequest(BaseModel):
-    content: str
-    keywords: Optional[List[str]] = None
-    theme: Optional[str] = None
-
-
-class GenerateContentManualRequest(BaseModel):
-    user_id: str
-    task_id: str
-    theme: str
-    raw_material: str
-    content_type: str = "summary"
-
-
-# Modelo para o retorno do material bruto ou gerado do DB
-class MaterialResponse(BaseModel):
-    id: int
-    user_id: str
-    task_id: str
-    theme: str
-    raw_material: Optional[str] = None
-    source_urls: Optional[List[str]] = None
-    content_type: Optional[str] = None
-    status: str
-    generated_content: Optional[Dict[str, Any]] = None
-    created_at: datetime
-    updated_at: datetime
-
-
-# Modelo para o envio do post final para o backend Spring Boot
-class SubmitFinalPostRequest(BaseModel):
-    title: Dict[str, str]
-    excerpt: Dict[str, str]
-    content: Dict[str, str]
-    metaDescription: Dict[str, str]
-    image: Optional[str] = None
-    author: str
-    tags: List[str]
-    category: Optional[str] = None
-    affiliateLinks: Optional[Dict[str, str]] = None
-    status: str
-    publishedAt: Optional[datetime] = None
-    readTime: Optional[str] = None
-    task_id_to_delete: Optional[str] = None  # Para deletar o rascunho do SQLite
-
-
-# --- NOVOS ENDPOINTS PARA SCRAPING E ENTRADA MANUAL ---
-
-
-@app.post("/fetch_urls")
-async def fetch_urls(request_body: FetchURLsRequest):
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+async def generate_image_with_imagen(image_prompt: str) -> str:
     """
-    Fetches raw HTML body content from multiple URLs.
-    Returns both raw HTML and cleaned text for each URL.
+    Gera uma imagem usando a API Imagen 3.0 e retorna a imagem como string Base64.
     """
-    results = []
-    for url in request_body.urls:
-        raw_html = fetch_url_content(str(url))
-        clean_text = clean_html_content(raw_html) if "Erro" not in raw_html else ""
-        results.append(
-            {"url": str(url), "raw_html": raw_html, "clean_text": clean_text}
+    api_key = ""  # Leave as-is
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key={api_key}"
+    payload = {"instances": {"prompt": image_prompt}, "parameters": {"sampleCount": 1}}
+    logger.info(
+        f"Iniciando geração de imagem com Imagen 3.0 para o prompt: '{image_prompt}'"
+    )
+    try:
+        response = requests.post(
+            api_url,
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=Config.REQUEST_TIMEOUT,
         )
-    return {"results": results}
-
-
-@app.post("/extract_content")
-async def extract_content(request_body: ExtractRequest):
-    """
-    Extracts content from a URL using CSS selectors.
-    Returns raw HTML and cleaned text for each extracted item.
-    """
-    extracted_items = extract_content_by_selectors(
-        str(request_body.url), request_body.selectors
-    )
-    processed_items = []
-    for item in extracted_items:
-        if "error" not in item:
-            clean_text = clean_html_content(item["content"])
-            processed_items.append(
-                {
-                    "selector": item["selector"],
-                    "raw_html": item["content"],
-                    "clean_text": clean_text,
-                }
-            )
+        response.raise_for_status()
+        result = response.json()
+        if (
+            result.get("predictions")
+            and len(result["predictions"]) > 0
+            and result["predictions"][0].get("bytesBase64Encoded")
+        ):
+            image_base64 = result["predictions"][0]["bytesBase64Encoded"]
+            image_url = f"data:image/png;base64,{image_base64}"
+            logger.info("Imagem gerada com sucesso em Base64.")
+            return image_url
         else:
-            processed_items.append(item)
-    return {"extracted_contents": processed_items}
+            logger.error(f"Resposta inválida da API Imagen 3.0: {result}")
+            raise HTTPException(
+                status_code=500, detail="Resposta inválida da API Imagen 3.0."
+            )
+    except requests.exceptions.Timeout:
+        logger.error(
+            f"Timeout ao gerar imagem com Imagen 3.0 para o prompt: '{image_prompt}'",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=504, detail="Timeout ao gerar imagem com IA.")
+    except requests.exceptions.RequestException as e:
+        logger.error(
+            f"Erro HTTP/Requisição ao gerar imagem com Imagen 3.0: {e}", exc_info=True
+        )
+        detail = f"Erro na API Imagen 3.0: {e.response.text}" if e.response else str(e)
+        raise HTTPException(
+            status_code=e.response.status_code if e.response else 500, detail=detail
+        )
+    except Exception as e:
+        logger.error(
+            f"Erro inesperado ao gerar imagem com Imagen 3.0: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=500, detail=f"Erro interno ao gerar imagem: {e}"
+        )
 
 
-@app.post("/get_parent_selector")
-async def get_parent_selector_endpoint(request_body: GetParentSelectorRequest):
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+def send_post(post_data: Dict[str, Any], headers: Dict[str, str]):
+    """Envia o post final para o backend principal."""
+    backend_url = Config.get_backend_url()
+    try:
+        response = requests.post(
+            f"{backend_url}/api/posts", json=post_data, headers=headers
+        )
+        response.raise_for_status()
+        return response
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erro ao enviar post para o backend principal: {e}")
+        if e.response:
+            logger.error(f"Resposta de erro do backend: {e.response.text}")
+        raise
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+def send_logs_to_backend(log_data: Dict[str, Any], headers: Dict[str, str]):
     """
-    Identifies a CSS selector for the parent of the first element found by the input selectors.
+    Envia dados de log para o backend de logs.
     """
-    parent_selectors = get_parent_selector_func(
-        str(request_body.url), request_body.selectors
-    )
-    return {"parent_selectors": parent_selectors}
+    url = Config.LOGS_API_URL
+    if not url:
+        logger.warning("LOGS_API_URL não configurada. Não é possível enviar logs.")
+        return
+    try:
+        response = requests.post(
+            url, json=log_data, headers=headers, timeout=Config.REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+        logger.info(
+            f"Logs enviados com sucesso para {url}. Status: {response.status_code}"
+        )
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout ao enviar logs para {url}")
+        raise
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erro ao enviar logs para {url}: {e}")
+        if e.response is not None:
+            logger.error(f"Resposta do erro: {e.response.text}")
+        raise
 
 
-@app.post("/save_selectors")
-async def save_selectors(request_body: SaveSelectorsRequest):
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+def get_existing_posts(headers: Dict[str, str]) -> List[str]:
     """
-    Saves selector entries to a JSON file.
+    Busca os títulos de posts existentes no backend Spring Boot para verificar duplicidade.
+    Retorna uma lista de títulos em português (PT).
     """
-    save_dir = os.getenv("SAVED_SELECTORS_DIR", "./saved_selectors")
-    result = save_selector_data(
-        [entry.dict() for entry in request_body.entries], save_dir
-    )
-    if "Erro" in result:
-        raise HTTPException(status_code=500, detail=result)
-    return {"message": result}
+    url = f"{Config.SPRING_BOOT_API_URL}/api/posts"
+    logger.info(f"Buscando posts existentes de: {url}")
+    try:
+        response = requests.get(url, headers=headers, timeout=Config.REQUEST_TIMEOUT)
+        response.raise_for_status()
+        posts = response.json()
+        existing_titles_pt = []
+        for post in posts:
+            if (
+                "title" in post
+                and isinstance(post["title"], dict)
+                and "PT" in post["title"]
+            ):
+                existing_titles_pt.append(post["title"]["PT"].strip())
+        logger.info(
+            f"Encontrados {len(existing_titles_pt)} títulos de posts existentes."
+        )
+        return existing_titles_pt
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout ao buscar posts existentes de {url}")
+        return []
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erro ao buscar posts existentes de {url}: {e}")
+        if e.response is not None:
+            logger.error(f"Resposta do erro: {e.response.text}")
+        return []
+    except Exception as e:
+        logger.error(
+            f"Erro inesperado ao processar posts existentes: {e}", exc_info=True
+        )
+        return []
 
 
-@app.post("/paste_material")
-async def paste_material(request_body: PasteContentRequest):
+async def fetch_automation_request_details_from_spring_boot(
+    automation_request_id: int, user_token: str
+) -> AutomationRequestDetails:
     """
-    Receives raw text content pasted by the user.
+    Busca os detalhes de uma requisição de automação (tema, tipo de conteúdo)
+    do backend Spring Boot.
     """
-    return {
-        "status": "success",
-        "message": "Conteúdo colado recebido e pronto para processamento.",
-        "pasted_content": request_body.content,
-        "keywords": request_body.keywords,
-        "theme": request_body.theme,
-    }
+    backend_url = Config.get_backend_url()
+    headers = {"Authorization": f"Bearer {user_token}"}
+    url = f"{backend_url}/api/automation-requests/{automation_request_id}"
+
+    logger.info(f"Buscando detalhes da automação do Spring Boot: {url}")
+    try:
+        response = requests.get(url, headers=headers, timeout=Config.REQUEST_TIMEOUT)
+        response.raise_for_status()
+        data = response.json()
+        logger.info(f"Detalhes da automação recebidos: {data}")
+        return AutomationRequestDetails(**data)
+    except requests.exceptions.Timeout:
+        logger.error(
+            f"Timeout ao buscar detalhes da automação do Spring Boot para ID: {automation_request_id}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=504, detail="Timeout ao buscar detalhes da automação."
+        )
+    except requests.exceptions.RequestException as e:
+        logger.error(
+            f"Erro HTTP/Requisição ao buscar detalhes da automação do Spring Boot: {e}",
+            exc_info=True,
+        )
+        detail = (
+            f"Erro ao buscar detalhes da automação: {e.response.text}"
+            if e.response
+            else str(e)
+        )
+        raise HTTPException(
+            status_code=e.response.status_code if e.response else 500, detail=detail
+        )
+    except Exception as e:
+        logger.error(
+            f"Erro inesperado ao buscar detalhes da automação do Spring Boot: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500, detail=f"Erro interno ao buscar detalhes da automação: {e}"
+        )
 
 
-# --- ENDPOINT PARA GERAÇÃO DE CONTEÚDO MANUAL (ASSÍNCRONA) ---
-@app.post("/generate_content_manual_async")
-async def generate_content_manual_async(
-    request_body: GenerateContentManualRequest,
-    background_tasks: BackgroundTasks,
+def _save_material_process_initial_data(
+    user_id: str,
+    automation_request_id: Optional[int],
+    task_id: str,
+    status: str,
+    theme: Optional[str] = None,
+    content_type: Optional[str] = None,
+):
+    """Salva os dados iniciais do processo de material no SQLite."""
+    try:
+        db_service.save_material(
+            user_id,
+            automation_request_id,
+            task_id,
+            status,
+            theme,
+            content_type,
+            None,
+            None,
+            None,
+            datetime.now(timezone.utc).isoformat().replace("+00:00", ""),
+            datetime.now(timezone.utc).isoformat().replace("+00:00", ""),
+        )
+        logger.info(
+            f"Dados iniciais do MaterialProcess salvos para user_id: {user_id}, task_id: {task_id}"
+        )
+    except Exception as e:
+        logger.error(
+            f"Erro ao salvar dados iniciais do MaterialProcess no SQLite: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Erro interno ao salvar dados")
+
+
+async def process_material_task(
+    user: Dict[str, Any],
+    automation_request_id: Optional[int],
+    task_id: str,
 ):
     """
-    Aciona a geração de conteúdo usando Gemini em segundo plano com material fornecido pelo usuário.
-    Retorna imediatamente um task_id para consulta de status.
+    Tarefa em segundo plano para coletar material bruto e gerar conteúdo.
+    Busca o tema e o tipo de conteúdo do banco de dados PostgreSQL via Spring Boot.
     """
-    user_id = request_body.user_id
-    task_id = request_body.task_id if request_body.task_id else str(uuid.uuid4())
-
-    existing_material = db_service.get_material(user_id, task_id)
-    if existing_material:
-        db_service.update_material_status(
-            user_id=user_id, task_id=task_id, status="GENERATING"
-        )
-    else:
-        db_service.save_material(
-            user_id=user_id,
-            task_id=task_id,
-            theme=request_body.theme,
-            raw_material=request_body.raw_material,
-            source_urls=[],
-            content_type=request_body.content_type,
-            status="GENERATING",
-        )
+    user_id = user["payload"].get("sub", "anonymous_user")
+    user_token = user["token"]
     logger.info(
-        f"Geração de conteúdo para task_id '{task_id}' (user '{user_id}') iniciada em segundo plano."
+        f"Iniciando process_material_task para user_id: {user_id}, task_id: {task_id}, automation_request_id: {automation_request_id}"
     )
+    theme = None
+    content_type = None
 
-    background_tasks.add_task(
-        _run_gemini_generation_in_background,
-        user_id,
-        task_id,
-        request_body.theme,
-        request_body.raw_material,
-        request_body.content_type,
-    )
+    if automation_request_id:  # Só tenta buscar do Spring Boot se tiver um ID
+        try:
+            automation_details = (
+                await fetch_automation_request_details_from_spring_boot(
+                    automation_request_id, user_token
+                )
+            )
+            theme = automation_details.theme
+            content_type = automation_details.outputFormat
+            db_service.update_material_theme_and_content_type(
+                user_id, task_id, theme, content_type
+            )
+            logger.info(
+                f"Tema e tipo de conteúdo atualizados no SQLite para task_id: {task_id}"
+            )
+        except HTTPException as e:
+            logger.error(
+                f"Falha ao obter detalhes da automação do Spring Boot: {e.detail}"
+            )
+            db_service.update_material_status(user_id, task_id, "FETCH_DETAILS_FAILED")
+            return
+        except Exception as e:
+            logger.error(
+                f"Erro inesperado ao buscar detalhes da automação: {e}", exc_info=True
+            )
+            db_service.update_material_status(user_id, task_id, "FETCH_DETAILS_FAILED")
+            return
+    else:  # Se não houver automation_request_id, usa o tema e content_type já salvos ou padrões
+        material_data = db_service.get_material(user_id, task_id)
+        if material_data:
+            theme = material_data.get("theme")
+            content_type = material_data.get("content_type")
 
-    return {
-        "message": "Geração de conteúdo iniciada em segundo plano.",
-        "task_id": task_id,
-        "status": "GENERATING",
-    }
+    if not theme or not content_type:
+        logger.error(f"Tema ou tipo de conteúdo não obtidos para task_id: {task_id}.")
+        db_service.update_material_status(user_id, task_id, "FETCH_DETAILS_FAILED")
+        return
+
+    try:
+        search_query = theme
+        url_to_scrape = "https://www.tecmundo.com.br/inteligencia-artificial/290352-chatgpt-agora-faz-tudo-voce-quase-tudo.htm"
+        saved_selectors = db_service.get_selectors_by_url(user_id, url_to_scrape)
+        if saved_selectors:
+            parent_selector = saved_selectors.get("parent_selector")
+            title_selector = saved_selectors.get("title_selector")
+            content_selector = saved_selectors.get("content_selector")
+            image_selector = saved_selectors.get("image_selector")
+            raw_material = fetch_url_content(url_to_scrape)
+            extracted_data = extract_content_by_selectors(
+                raw_material,
+                parent_selector,
+                title_selector,
+                content_selector,
+                image_selector,
+            )
+            raw_material_content = json.dumps(extracted_data, ensure_ascii=False)
+        else:
+            try:
+                with open("artigos base.txt", "r", encoding="utf-8") as f:
+                    raw_material_content = f.read()
+                logger.info(
+                    "Conteúdo de 'artigos base.txt' carregado como material bruto."
+                )
+            except FileNotFoundError:
+                logger.warning(
+                    "Arquivo 'artigos base.txt' não encontrado. Usando conteúdo de fallback."
+                )
+                raw_material_content = (
+                    "Conteúdo de exemplo para testes. Nenhuma raspagem real foi feita."
+                )
+
+        db_service.update_material_raw_material(
+            user_id, task_id, raw_material_content, "RAW_COLLECTED"
+        )
+        logger.info(f"Material bruto coletado e salvo para task_id: {task_id}")
+
+    except Exception as e:
+        logger.error(
+            f"Erro na coleta de material bruto para task_id {task_id}: {e}",
+            exc_info=True,
+        )
+        db_service.update_material_status(user_id, task_id, "COLLECTION_FAILED")
+        return
+
+    try:
+        prompt = f"Crie um {content_type} detalhado sobre '{theme}' usando o seguinte material bruto:"
+        generated_content = await generate_content_with_gemini_service(
+            theme=theme,
+            raw_material=raw_material_content,
+            content_type=content_type,
+            keywords=None,
+            tone=None,
+            cta_instruction=None,
+            article_structure=None,
+            audience=None,
+            ideal_article_example=None,
+        )
+        suggested_image_prompt = generated_content.get(
+            "suggested_image_prompt", "Imagem relevante para o artigo."
+        )
+        db_service.update_material_generated_content(
+            user_id,
+            task_id,
+            json.dumps(generated_content, ensure_ascii=False),
+            suggested_image_prompt,
+            "GENERATED",
+        )
+        logger.info(f"Conteúdo gerado e salvo para task_id: {task_id}")
+
+    except Exception as e:
+        logger.error(
+            f"Erro na geração de conteúdo Gemini para task_id {task_id}: {e}",
+            exc_info=True,
+        )
+        db_service.update_material_status(user_id, task_id, "GENERATION_FAILED")
+        return
 
 
 async def _run_gemini_generation_in_background(
-    user_id: str, task_id: str, theme: str, raw_material: str, content_type: str
+    user_id: str,
+    task_id: str,
+    theme: str,
+    raw_material: str,
+    content_type: str,
+    keywords: Optional[List[str]],
+    tone: Optional[str],
+    cta_instruction: Optional[str],
+    article_structure: Optional[List[str]],
+    audience: Optional[str],
+    ideal_article_example: Optional[str],
 ):
     """
     Função auxiliar para executar a geração Gemini em segundo plano e atualizar o DB.
     """
     try:
         generated_data = await generate_content_with_gemini_service(
-            theme, raw_material, content_type
+            theme,
+            raw_material,
+            content_type,
+            keywords=keywords,
+            tone=tone,
+            cta_instruction=cta_instruction,
+            article_structure=article_structure,
+            audience=audience,
+            ideal_article_example=ideal_article_example,
         )
-        db_service.update_material_status(
+        db_service.update_material(
             user_id=user_id,
             task_id=task_id,
             status="GENERATED",
-            generated_content=generated_data,
+            generated_content=json.dumps(generated_data, ensure_ascii=False),
+            suggested_image_prompt=generated_data.get("suggested_image_prompt"),
         )
         logger.info(
             f"Geração de conteúdo para task_id '{task_id}' (user '{user_id}') concluída e salva no DB."
@@ -864,58 +804,360 @@ async def _run_gemini_generation_in_background(
         )
 
 
-# --- ENDPOINTS PARA CONSULTAR STATUS E LISTAR MATERIAIS ---
+# --- ENDPOINTS FastAPI (usando router) ---
 
 
-@app.get("/get_task_result/{user_id}/{task_id}", response_model=MaterialResponse)
+@router.get("/trigger-by-id/{automation_request_id}", response_model=TriggerResponse)
+async def trigger_by_id_endpoint(
+    automation_request_id: int,
+    background_tasks: BackgroundTasks,
+    user_payload: dict = Depends(Auth.verify_token),
+    db: Session = Depends(get_db),
+):
+    """
+    Aciona a automação para COLETAR E PREPARAR material bruto em segundo plano,
+    com base em um registro existente no banco de dados.
+    Retorna imediatamente um task_id para consulta de status.
+    """
+    logger.info(
+        f"Endpoint /trigger-by-id/{automation_request_id} acionado pelo usuário: {user_payload.get('sub', 'Desconhecido')} para coletar material bruto."
+    )
+
+    user_id = user_payload.get("sub", "anonymous_user")
+    task_id = str(uuid.uuid4())
+
+    try:
+        request_entry = (
+            db.query(AutomationRequest)
+            .filter(AutomationRequest.id == automation_request_id)
+            .first()
+        )
+        if not request_entry:
+            logger.warning(
+                f"Registro com ID {automation_request_id} não encontrado no banco de dados compartilhado."
+            )
+            if Config.LOGS_API_URL:
+                try:
+                    log_data = {
+                        "action": f"Falha ao executar automação para ID {automation_request_id}: Registro não encontrado.",
+                        "timestamp": datetime.now(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", ""),
+                        "level": "WARNING",
+                        "report_id": task_id,
+                    }
+                    send_logs_to_backend(
+                        log_data,
+                        {"Authorization": f"Bearer {user_payload.get('token')}"},
+                    )
+                except Exception as log_err:
+                    logger.error(
+                        f"Erro ao enviar log de ID não encontrado para o backend: {str(log_err)}",
+                        exc_info=True,
+                    )
+            raise HTTPException(
+                status_code=404,
+                detail=f"Registro com ID {automation_request_id} não encontrado",
+            )
+
+        output_format = request_entry.output_format
+        theme = request_entry.theme
+        logger.info(
+            f"Parâmetros do DB para ID {automation_request_id}: output_format='{output_format}', theme='{theme}'"
+        )
+
+        _save_material_process_initial_data(
+            user_id=user_id,
+            automation_request_id=automation_request_id,
+            task_id=task_id,
+            status="PENDING_COLLECTION",
+            theme=theme,
+            content_type=output_format,
+        )
+        logger.info(
+            f"Registro inicial da tarefa '{task_id}' para coleta de material salvo no DB."
+        )
+
+        background_tasks.add_task(
+            process_material_task,
+            user_payload,
+            automation_request_id,
+            task_id,
+        )
+
+        logger.info(
+            f"Coleta de material para ID {automation_request_id} iniciada em segundo plano. Task ID: {task_id}"
+        )
+        return TriggerResponse(
+            trigger_id=automation_request_id,
+            message="Coleta de material iniciada em segundo plano. Consulte o status usando o task_id.",
+            task_id=task_id,
+            status="PENDING_COLLECTION",
+        )
+
+    except HTTPException as http_exc:
+        logger.error(
+            f"HTTPException levantada durante a execução para ID {automation_request_id}: {str(http_exc.detail)}",
+            exc_info=True,
+        )
+        if Config.LOGS_API_URL:
+            try:
+                log_data = {
+                    "action": f"Falha na execução da automação para ID {automation_request_id}. Erro: {str(http_exc.detail)}",
+                    "timestamp": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", ""),
+                    "level": "ERROR",
+                    "report_id": task_id,
+                }
+                send_logs_to_backend(
+                    log_data, {"Authorization": f"Bearer {user_payload.get('token')}"}
+                )
+            except Exception as log_err:
+                logger.error(
+                    f"Erro ao enviar log de HTTPException para o backend: {str(log_err)}",
+                    exc_info=True,
+                )
+        raise
+    except Exception as e:
+        logger.error(
+            f"Erro inesperado ao executar automação via /trigger-by-id/{automation_request_id}: {str(e)}",
+            exc_info=True,
+        )
+        if Config.LOGS_API_URL:
+            try:
+                log_data = {
+                    "action": f"Erro inesperado na execução da automação para ID {automation_request_id}. Erro: {str(e)}",
+                    "timestamp": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", ""),
+                    "level": "CRITICAL",
+                    "report_id": task_id,
+                }
+                send_logs_to_backend(
+                    log_data, {"Authorization": f"Bearer {user_payload.get('token')}"}
+                )
+            except Exception as log_err:
+                logger.error(
+                    f"Erro ao enviar log de erro inesperado para o backend: {str(log_err)}",
+                    exc_info=True,
+                )
+        raise HTTPException(
+            status_code=500, detail=f"Erro interno ao executar automação: {str(e)}"
+        )
+
+
+@router.post("/trigger", response_model=TriggerResponse)
+async def trigger_automation_post_endpoint(
+    request_data: TriggerRequest,
+    background_tasks: BackgroundTasks,
+    user_payload: dict = Depends(Auth.verify_token),
+):
+    """
+    Aciona a automação de geração de posts com base em parâmetros fornecidos no corpo da requisição JSON.
+    Este endpoint inicia o processo em segundo plano (assíncrono).
+    Requer um token JWT válido.
+    """
+    logger.info(
+        f"Endpoint POST /trigger acionado pelo usuário: {user_payload.get('sub', 'Desconhecido')}"
+    )
+
+    output_format = request_data.output_format
+    theme = request_data.theme
+    user_id = user_payload.get("sub", "anonymous_user")
+    task_id = str(uuid.uuid4())
+
+    try:
+        logger.info(
+            f"Parâmetros recebidos: output_format='{output_format}', theme='{theme}'"
+        )
+
+        _save_material_process_initial_data(
+            user_id=user_id,
+            automation_request_id=None,  # Não há automation_request_id para este trigger manual
+            task_id=task_id,
+            status="PENDING_COLLECTION",
+            theme=theme,
+            content_type=output_format,
+        )
+        logger.info(
+            f"Registro inicial da tarefa '{task_id}' para coleta de material salvo no DB (trigger manual)."
+        )
+
+        background_tasks.add_task(
+            process_material_task,  # Reutiliza a função de processamento principal
+            user_payload,
+            None,  # Não há automation_request_id para este trigger manual
+            task_id,
+        )
+
+        logger.info(
+            f"Coleta de material para trigger manual iniciada em segundo plano. Task ID: {task_id}"
+        )
+        return TriggerResponse(
+            message="Coleta de material iniciada em segundo plano. Consulte o status usando o task_id.",
+            task_id=task_id,
+            status="PENDING_COLLECTION",
+        )
+
+    except ValidationError as e:
+        logger.error(
+            f"Erro de validação Pydantic para POST /trigger: {str(e)}", exc_info=True
+        )
+        if Config.LOGS_API_URL:
+            try:
+                log_data = {
+                    "action": f"Falha de validação Pydantic para POST /trigger. Erro: {str(e)}",
+                    "timestamp": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", ""),
+                    "level": "ERROR",
+                    "report_id": task_id,
+                }
+                send_logs_to_backend(
+                    log_data, {"Authorization": f"Bearer {user_payload.get('token')}"}
+                )
+            except Exception as log_err:
+                logger.error(
+                    f"Erro ao enviar log de ValidationError para o backend: {str(log_err)}",
+                    exc_info=True,
+                )
+        errors = e.errors()
+        formatted_errors = [
+            {"loc": err["loc"], "msg": err["msg"], "type": err["type"]}
+            for err in errors
+        ]
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Erro de validação do corpo da requisição.",
+                "errors": formatted_errors,
+            },
+        )
+    except HTTPException as http_exc:
+        logger.error(
+            f"HTTPException levantada durante a execução de POST /trigger: {str(http_exc.detail)}",
+            exc_info=True,
+        )
+        if Config.LOGS_API_URL:
+            try:
+                log_data = {
+                    "action": f"Falha na execução da automação POST /trigger. Erro: {str(http_exc.detail)}",
+                    "timestamp": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", ""),
+                    "level": "ERROR",
+                    "report_id": task_id,
+                }
+                send_logs_to_backend(
+                    log_data, {"Authorization": f"Bearer {user_payload.get('token')}"}
+                )
+            except Exception as log_err:
+                logger.error(
+                    f"Erro ao enviar log de HTTPException para o backend: {str(log_err)}",
+                    exc_info=True,
+                )
+        raise
+    except Exception as e:
+        logger.error(
+            f"Erro inesperado ao executar automação via POST /trigger: {str(e)}",
+            exc_info=True,
+        )
+        if Config.LOGS_API_URL:
+            try:
+                log_data = {
+                    "action": f"Erro inesperado na execução da automação POST /trigger. Erro: {str(e)}",
+                    "timestamp": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", ""),
+                    "level": "CRITICAL",
+                    "report_id": task_id,
+                }
+                send_logs_to_backend(
+                    log_data, {"Authorization": f"Bearer {user_payload.get('token')}"}
+                )
+            except Exception as log_err:
+                logger.error(
+                    f"Erro ao enviar log de erro inesperado para o backend: {str(log_err)}",
+                    exc_info=True,
+                )
+        raise HTTPException(
+            status_code=500, detail=f"Erro interno ao executar automação: {str(e)}"
+        )
+
+
+@router.get("/get_task_result/{user_id}/{task_id}", response_model=MaterialResponse)
 async def get_task_result_endpoint(user_id: str, task_id: str):
     """
-    Consulta o status e o resultado de uma tarefa específica pelo task_id e user_id.
+    Consulta o status e o resultado de uma tarefa específica (coleta ou geração) pelo task_id e user_id.
     """
     material = db_service.get_material(user_id, task_id)
     if not material:
         raise HTTPException(
             status_code=404, detail="Tarefa ou material não encontrado."
         )
+    # Tenta desserializar os campos JSON
+    if material.get("raw_material") and isinstance(material["raw_material"], str):
+        try:
+            material["raw_material"] = json.loads(material["raw_material"])
+        except json.JSONDecodeError:
+            pass
+    if material.get("generated_content") and isinstance(
+        material["generated_content"], str
+    ):
+        try:
+            material["generated_content"] = json.loads(material["generated_content"])
+        except json.JSONDecodeError:
+            pass
     return MaterialResponse(**material)
 
 
-@app.get("/list_user_materials/{user_id}", response_model=List[MaterialResponse])
+@router.get("/list_user_materials/{user_id}", response_model=List[MaterialResponse])
 async def list_user_materials_endpoint(user_id: str):
     """
     Lista todos os materiais (brutos ou gerados) associados a um user_id.
     """
     materials = db_service.list_user_materials(user_id)
-    return [MaterialResponse(**m) for m in materials]
+    response_list = []
+    for material in materials:
+        if material.get("raw_material") and isinstance(material["raw_material"], str):
+            try:
+                material["raw_material"] = json.loads(material["raw_material"])
+            except json.JSONDecodeError:
+                pass
+        if material.get("generated_content") and isinstance(
+            material["generated_content"], str
+        ):
+            try:
+                material["generated_content"] = json.loads(
+                    material["generated_content"]
+                )
+            except json.JSONDecodeError:
+                pass
+        response_list.append(MaterialResponse(**material))
+    return response_list
 
 
-# --- NOVO ENDPOINT PARA ENVIAR POST FINAL PARA O POSTGRESQL ---
-@app.post("/submit_final_post")
-async def submit_final_post(
+@router.post("/submit_final_post")
+async def submit_final_post_endpoint(
     request_body: SubmitFinalPostRequest,
-    user: dict = Depends(Auth.verify_token),  # Usar a dependência verify_token do Auth
+    user_payload: dict = Depends(Auth.verify_token),
 ):
     """
     Recebe o conteúdo final, aprovado pelo usuário, e o envia para o backend PostgreSQL.
     Opcionalmente, deleta o registro temporário do SQLite.
     """
     logger.info(
-        f"Endpoint /submit_final_post acionado pelo usuário: {user['payload'].get('sub', 'Desconhecido')}"
+        f"Endpoint /submit_final_post acionado pelo usuário: {user_payload.get('sub', 'Desconhecido')}"
     )
-
-    headers = {"Authorization": f"Bearer {user['token']}"}
-
-    post_data_for_pg = request_body.dict(exclude_unset=True)
-
-    task_id_to_delete = post_data_for_pg.pop("task_id_to_delete", None)
-
+    headers = {"Authorization": f"Bearer {user_payload.get('token')}"}
+    post_data_for_pg = request_body.post_data
+    task_id_to_delete = request_body.task_id_to_delete
     try:
-        # CHAMA A FUNÇÃO send_post DEFINIDA NESTE MESMO ARQUIVO
         response = send_post(post_data_for_pg, headers)
         response.raise_for_status()
-
         if task_id_to_delete:
-            user_id = user["payload"].get("sub", "anonymous_user")
+            user_id = user_payload.get("sub", "anonymous_user")
             if db_service.delete_material(user_id, task_id_to_delete):
                 logger.info(
                     f"Material temporário com task_id '{task_id_to_delete}' deletado do SQLite."
@@ -924,12 +1166,10 @@ async def submit_final_post(
                 logger.warning(
                     f"Falha ao deletar material temporário com task_id '{task_id_to_delete}' do SQLite."
                 )
-
         return {
             "message": "Post final enviado com sucesso para o backend e material temporário limpo (se aplicável).",
             "status": "SUCCESS",
         }
-
     except requests.exceptions.RequestException as e:
         logger.error(
             f"Erro ao enviar post final para o backend: {str(e)}", exc_info=True
@@ -945,3 +1185,43 @@ async def submit_final_post(
             f"Erro inesperado no endpoint /submit_final_post: {str(e)}", exc_info=True
         )
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+
+
+@router.post("/save-selectors")
+async def save_selectors_endpoint(
+    selectors_data: List[SelectorData],
+    user: Dict[str, Any] = Depends(Auth.verify_token),
+):
+    """
+    Salva uma lista de seletores no banco de dados.
+    """
+    user_id = user["payload"].get("sub", "anonymous_user")
+    try:
+        save_selector_data(user_id, selectors_data)
+        return {"message": "Seletores salvos com sucesso!"}
+    except Exception as e:
+        logger.error(f"Erro ao salvar seletores: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar seletores: {e}")
+
+
+@router.get("/get-selectors")
+async def get_selectors_endpoint(user: Dict[str, Any] = Depends(Auth.verify_token)):
+    """
+    Obtém a lista de seletores salvos para o usuário autenticado.
+    """
+    user_id = user["payload"].get("sub", "anonymous_user")
+    try:
+        selectors = db_service.get_selectors(user_id)
+        return [SelectorData(**s) for s in selectors]
+    except Exception as e:
+        logger.error(f"Erro ao obter seletores: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao obter seletores: {e}")
+
+
+@router.get("/test-ok")
+async def test_ok_endpoint():
+    """Endpoint simples para testar a conexão."""
+    logger.info("Endpoint /test-ok acionado. Retornando OK.")
+    return JSONResponse(
+        content={"status": "ok", "message": "Conexão com servidor Python bem-sucedida!"}
+    )

@@ -30,6 +30,7 @@ from src.models import AutomationRequest
 from src.api import send_logs_to_backend, MaterialResponse, SubmitFinalPostRequest
 from src.auth import Auth  # Importar Auth para usar Auth.verify_token
 import src.database_service as db_service  # Importação adicionada para db_service
+from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,21 @@ security = HTTPBearer()
 
 # JWT_SECRET_BASE64 e ALGORITHM agora são gerenciados pela classe Auth
 # Remove a decodificação direta aqui, pois Auth.verify_token fará isso.
+
+origins = [
+    "http://localhost:5500",
+    "http://localhost:4200",
+    "http://localhost:3300",
+    "http://127.0.0.1:5500",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 class TriggerRequest(BaseModel):
