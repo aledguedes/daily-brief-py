@@ -1,182 +1,128 @@
 # src/scraping_service.py
-import requests
-from bs4 import BeautifulSoup
-import re
-import os
-import json
 import logging
+from typing import List
+from pydantic import HttpUrl
+import aiohttp
+from bs4 import BeautifulSoup
+
+from src.config import Config
+import src.database_service as db_service
 
 logger = logging.getLogger(__name__)
 
 
+async def fetch_url_content(url: str) -> str:
+    """
+    Busca o conteúdo HTML de uma URL fornecida.
+
+    Args:
+        url (str): URL a ser acessada.
+
+    Returns:
+        str: Conteúdo HTML bruto ou string vazia em caso de erro.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=Config.REQUEST_TIMEOUT) as response:
+                response.raise_for_status()
+                return await response.text()
+    except Exception as e:
+        logger.error(f"Erro ao buscar conteúdo da URL {url}: {str(e)}")
+        return ""
+
+
 def clean_html_content(html_content: str) -> str:
     """
-    Remove HTML tags from a string and return plain text.
+    Limpa o conteúdo HTML, removendo scripts, estilos e extraindo texto limpo.
+
+    Args:
+        html_content (str): Conteúdo HTML bruto.
+
+    Returns:
+        str: Texto limpo extraído do HTML.
     """
-    if not html_content:
+    try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        for script in soup(["script", "style"]):
+            script.decompose()
+        text = soup.get_text(separator="\n")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return "\n\n".join(lines)[: Config.MAX_TEXT_LEN]
+    except Exception as e:
+        logger.error(f"Erro ao limpar HTML: {e}")
         return ""
-    soup = BeautifulSoup(html_content, "html.parser")
-    # Remove script and style elements
-    for script_or_style in soup(["script", "style"]):
-        script_or_style.decompose()
-    # Get text and replace multiple spaces/newlines with a single space
-    text = soup.get_text()
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
 
 
-def fetch_url_content(url: str) -> str:
+def save_selector_data(user_id: str, selectors_data: List[dict]):
     """
-    Fetches the body content of a given URL, cleaning non-printable characters.
+    Salva uma lista de seletores no banco de dados para o usuário especificado.
+
+    Args:
+        user_id (str): ID do usuário.
+        selectors_data (List[dict]): Lista de seletores (url, parent_selector, title_selector, etc.).
     """
     try:
-        resp = requests.get(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            },
-            timeout=10,  # Add a timeout to prevent hanging requests
-        )
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        body = soup.body
-        if body is None:
-            logger.warning(f"Conteúdo <body> não encontrado para URL: {url}")
-            return "Erro: Conteúdo <body> não encontrado"
-        else:
-            body_html = str(
-                body
-            )  # Use str(body) instead of prettify() for raw HTML content
-            # Remove non-printable ASCII characters
-            body_html = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", body_html)
-            return body_html
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erro ao acessar a URL {url}: {e}")
-        return f"Erro ao acessar a URL: {str(e)}"
-    except Exception as e:
-        logger.error(f"Erro inesperado ao buscar URL {url}: {e}")
-        return f"Erro inesperado: {str(e)}"
-
-
-def extract_content_by_selectors(url: str, selectors: list[str]) -> list[dict]:
-    """
-    Extracts content from a URL based on CSS selectors.
-    Returns a list of dictionaries with 'selector' and 'content' (raw HTML).
-    """
-    results = []
-    try:
-        resp = requests.get(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for selector in selectors:
-            elements = soup.select(selector)
-            if elements:
-                # We return the outerHTML of the first found element, then clean it later
-                results.append({"selector": selector, "content": str(elements[0])})
-            else:
-                logger.warning(
-                    f"Nenhum elemento encontrado para o seletor '{selector}' na URL: {url}"
-                )
-        return results
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erro ao acessar a URL {url} para extração: {e}")
-        return [{"error": f"Erro ao acessar a URL: {str(e)}"}]
-    except Exception as e:
-        logger.error(f"Erro inesperado ao extrair conteúdo da URL {url}: {e}")
-        return [{"error": f"Erro inesperado: {str(e)}"}]
-
-
-def get_parent_selector_func(url: str, selectors: list[str]) -> list[str]:
-    """
-    Identifies a CSS selector for the parent of the first element found by the input selectors.
-    """
-    parent_selectors = []
-    try:
-        resp = requests.get(
-            url,
-            headers={
-                "User-Agent": "Mozilla/50 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for selector in selectors:
-            elements = soup.select(selector)
-            if elements and elements[0].parent:
-                parent = elements[0].parent
-                tag = parent.name
-                id_ = parent.get("id", "")
-                classes = parent.get("class", [])
-                parent_selector = tag
-                if id_:
-                    parent_selector += f"#{id_}"
-                if classes:
-                    parent_selector += "." + ".".join(classes)
-                parent_selectors.append(parent_selector)
-            else:
-                logger.warning(
-                    f"Nenhum elemento encontrado ou sem pai para o seletor '{selector}' na URL: {url}"
-                )
-                parent_selectors.append(
-                    selector
-                )  # Return original selector if no parent found/no element
-        return parent_selectors
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erro ao acessar a URL {url} para obter seletor pai: {e}")
-        return [f"Erro: {str(e)}" for _ in selectors]  # Return errors for all selectors
-    except Exception as e:
-        logger.error(f"Erro inesperado ao obter seletor pai da URL {url}: {e}")
-        return [f"Erro inesperado: {str(e)}" for _ in selectors]
-
-
-def save_selector_data(entries: list[dict], save_dir: str = "saved_selectors") -> str:
-    """
-    Saves selector entries to a JSON file.
-    """
-    if not entries:
-        return "Nenhuma entrada fornecida"
-
-    os.makedirs(save_dir, exist_ok=True)
-    file_path = os.path.join(save_dir, "mapeamento_seletores.json")
-    saved_data = []
-
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                saved_data = json.load(f)
-        except json.JSONDecodeError:
-            logger.warning(
-                f"Arquivo '{file_path}' corrompido ou vazio. Iniciando um novo."
+        for selector in selectors_data:
+            db_service.save_selector(
+                user_id=user_id,
+                url=str(selector["url"]),
+                parent_selector=selector.get("parent_selector"),
+                title_selector=selector.get("title_selector"),
+                content_selector=selector.get("content_selector"),
+                image_selector=selector.get("image_selector"),
             )
-            saved_data = []
-
-    for entry in entries:
-        url = entry.get("url")
-        selector = entry.get("selector", "body")
-        outer_html = entry.get("outerHTML_preview", "")
-        timestamp = entry.get("timestamp")
-        if not url or not timestamp:
-            logger.warning(f"Entrada inválida ignorada: {entry}")
-            continue
-        saved_data.append(
-            {
-                "url": url,
-                "selector": selector,
-                "outerHTML_preview": outer_html,  # Keep raw HTML preview for context
-                "timestamp": timestamp,
-            }
-        )
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(saved_data, f, indent=4, ensure_ascii=False)
-        return "Seletores salvos com sucesso!"
+        logger.info(f"Seletores salvos com sucesso para o usuário {user_id}.")
     except Exception as e:
-        logger.error(f"Erro ao salvar seletores em '{file_path}': {e}")
-        return f"Erro ao salvar: {str(e)}"
+        logger.error(f"Erro ao salvar seletores para o usuário {user_id}: {str(e)}")
+        raise
+
+
+async def extract_content_by_selectors(
+    url: HttpUrl,
+    parent_selector: str = None,
+    title_selector: str = None,
+    content_selector: str = None,
+    image_selector: str = None,
+) -> dict:
+    """
+    Extrai conteúdo de uma URL usando seletores CSS fornecidos.
+
+    Args:
+        url (HttpUrl): URL para extração.
+        parent_selector (str, opcional): Seletor CSS para elemento pai.
+        title_selector (str, opcional): Seletor CSS para título.
+        content_selector (str, opcional): Seletor CSS para conteúdo.
+        image_selector (str, opcional): Seletor CSS para imagem.
+
+    Returns:
+        dict: Conteúdo extraído (título, conteúdo, imagem).
+    """
+    try:
+        html_content = await fetch_url_content(str(url))
+        if not html_content:
+            return {}
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        extracted_data = {}
+
+        if parent_selector:
+            parent = soup.select_one(parent_selector)
+            if parent:
+                soup = parent
+
+        if title_selector:
+            title = soup.select_one(title_selector)
+            extracted_data["title"] = title.get_text(strip=True) if title else ""
+
+        if content_selector:
+            content = soup.select_one(content_selector)
+            extracted_data["content"] = content.get_text(strip=True) if content else ""
+
+        if image_selector:
+            image = soup.select_one(image_selector)
+            extracted_data["image"] = image["src"] if image and image.get("src") else ""
+
+        return extracted_data
+    except Exception as e:
+        logger.error(f"Erro ao extrair conteúdo com seletores da URL {url}: {str(e)}")
+        return {}

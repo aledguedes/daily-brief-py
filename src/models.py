@@ -21,6 +21,17 @@ class AutomationRequest(Base):
         return f"<AutomationRequest(id={self.id}, theme='{self.theme}', format='{self.output_format}')>"
 
 
+class RawMaterial(Base):
+    __tablename__ = "tbl_raw_materials"
+
+    id = Column(String(36), primary_key=True, index=True)
+    content = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    def __repr__(self):
+        return f"<RawMaterial(id={self.id}, content_length={len(self.content)})>"
+
+
 class TriggerRequest(BaseModel):
     output_format: str
     theme: Optional[str] = None

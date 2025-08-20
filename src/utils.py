@@ -2,8 +2,11 @@
 import os
 import json
 import logging
-from datetime import datetime, timedelta, timezone # Importar timezone
-import uuid # Importar uuid para save_payload_to_file
+from datetime import datetime, timedelta, timezone
+import uuid
+import requests
+
+from src.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +22,7 @@ os.makedirs("output/payloads", exist_ok=True)
 def save_cache(data):
     """Salva dados no arquivo de cache."""
     try:
-        # Adiciona um timestamp de quando o cache foi salvo
-        cache_data = {
-            "timestamp": datetime.now(timezone.utc).isoformat(), # Salva em UTC ISO format
-            "data": data
-        }
+        cache_data = {"timestamp": datetime.now(timezone.utc).isoformat(), "data": data}
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, ensure_ascii=False, indent=4)
         logger.info(f"Cache salvo em {CACHE_FILE}.")
@@ -48,33 +47,38 @@ def check_cache(cache_duration_hours):
             logger.warning("Cache encontrado, mas incompleto ou inválido.")
             return None
 
-        # Converte o timestamp do cache para objeto datetime (assumindo que está em UTC)
-        cache_timestamp = datetime.fromisoformat(cache_timestamp_str).replace(tzinfo=timezone.utc)
-        
-        # Calcula o tempo de expiração
+        cache_timestamp = datetime.fromisoformat(cache_timestamp_str).replace(
+            tzinfo=timezone.utc
+        )
         expiration_time = cache_timestamp + timedelta(hours=cache_duration_hours)
-        
-        # Compara com o tempo atual em UTC
+
         if datetime.now(timezone.utc) < expiration_time:
             logger.info(f"Cache válido. Expira em: {expiration_time.isoformat()}.")
             return cached_data
         else:
-            logger.info(f"Cache expirado. Salvo em: {cache_timestamp.isoformat()}. Expiração: {expiration_time.isoformat()}.")
+            logger.info(
+                f"Cache expirado. Salvo em: {cache_timestamp.isoformat()}. Expiração: {expiration_time.isoformat()}."
+            )
             return None
     except json.JSONDecodeError:
-        logger.error(f"Erro ao decodificar JSON do cache em {CACHE_FILE}. O arquivo pode estar corrompido.", exc_info=True)
-        os.remove(CACHE_FILE) # Remove o arquivo corrompido
+        logger.error(
+            f"Erro ao decodificar JSON do cache em {CACHE_FILE}. O arquivo pode estar corrompido.",
+            exc_info=True,
+        )
+        os.remove(CACHE_FILE)
         return None
     except Exception as e:
-        logger.error(f"Erro ao verificar cache em {CACHE_FILE}: {str(e)}", exc_info=True)
+        logger.error(
+            f"Erro ao verificar cache em {CACHE_FILE}: {str(e)}", exc_info=True
+        )
         return None
 
 
 def save_report(report_lines, is_error=False):
     """Salva o relatório de execução em um arquivo local."""
-    report_dir = "output/reports" # Salva relatórios em subpasta 'reports'
+    report_dir = "output/reports"
     os.makedirs(report_dir, exist_ok=True)
-    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename_prefix = "relatorio_erro_critico" if is_error else "relatorio"
     report_filename = os.path.join(report_dir, f"{filename_prefix}_{timestamp_str}.txt")
 
@@ -82,9 +86,11 @@ def save_report(report_lines, is_error=False):
         with open(report_filename, "w", encoding="utf-8") as report_file:
             report_file.write("\n".join(report_lines))
         logger.info(f"Relatório salvo em {report_filename}")
-        return report_filename # Retorna o caminho do arquivo salvo
+        return report_filename
     except Exception as e:
-        logger.error(f"Erro ao salvar relatório em {report_filename}: {str(e)}", exc_info=True)
+        logger.error(
+            f"Erro ao salvar relatório em {report_filename}: {str(e)}", exc_info=True
+        )
         return None
 
 
@@ -92,14 +98,14 @@ def save_payload_to_file(payload_data, theme, content_type):
     """Salva o payload JSON de um post em um arquivo local para auditoria."""
     payload_dir = "output/payloads"
     os.makedirs(payload_dir, exist_ok=True)
-    
-    # Gera um UUID para garantir nome de arquivo único
+
     post_uuid = str(uuid.uuid4())
-    # Sanitiza o nome do tema para uso em nome de arquivo
-    safe_tema_name = theme.replace(' ', '_').replace('/', '_').replace('\\', '_')
-    
-    filename = os.path.join(payload_dir, f"post_{safe_tema_name}_{content_type}_{post_uuid}.json")
-    
+    safe_tema_name = theme.replace(" ", "_").replace("/", "_").replace("\\", "_")
+
+    filename = os.path.join(
+        payload_dir, f"post_{safe_tema_name}_{content_type}_{post_uuid}.json"
+    )
+
     try:
         with open(filename, "w", encoding="utf-8") as file:
             json.dump(payload_data, file, ensure_ascii=False, indent=4)
@@ -108,3 +114,18 @@ def save_payload_to_file(payload_data, theme, content_type):
     except Exception as e:
         logger.error(f"Erro ao salvar payload em {filename}: {str(e)}", exc_info=True)
         return None
+
+
+def send_logs_to_backend(log_data):
+    """Envia logs para o backend configurado em Config.LOGS_API_URL."""
+    if not Config.LOGS_API_URL:
+        logger.warning("LOGS_API_URL não configurado. Log não enviado ao backend.")
+        return
+    try:
+        response = requests.post(
+            Config.LOGS_API_URL, json=log_data, timeout=Config.REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+        logger.info(f"Log enviado com sucesso para {Config.LOGS_API_URL}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erro ao enviar log para {Config.LOGS_API_URL}: {str(e)}")

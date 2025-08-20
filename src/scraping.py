@@ -2,16 +2,15 @@
 import asyncio
 import logging
 import aiohttp
-from amqp import NotFound
 import asyncpraw
 import asyncprawcore
 import requests
 from asyncprawcore.exceptions import (
+    NotFound,
     Forbidden as RedditForbidden,
     TooManyRequests,
-)  # Importar Forbidden especificamente
+)
 from newsapi import NewsApiClient
-from serpapi import GoogleSearch
 from src.config import Config
 from tenacity import (
     retry,
@@ -33,9 +32,6 @@ reddit = asyncpraw.Reddit(
     user_agent=Config.REDDIT_USER_AGENT,
 )
 
-# Configuração do SerpApi (Google Search)
-# A chave da API do Serper é usada diretamente na chamada da API, não precisa de objeto global aqui.
-
 
 @retry(
     stop=stop_after_attempt(5),
@@ -50,8 +46,6 @@ async def scrape_reddit(query: str):
     logger.info(f"Buscando posts do Reddit para: '{query}'")
     results = []
 
-    # Lista de subreddits para buscar, direcionada ao seu nicho
-    # Esta é a lista que você pode ajustar conforme sua necessidade
     subreddits_to_search = [
         "programming",
         "compsci",
@@ -63,14 +57,11 @@ async def scrape_reddit(query: str):
     ]
 
     try:
-        reddit = await asyncio.create_task(asyncpraw.Reddit())
-
         for subreddit_name in subreddits_to_search:
             try:
                 subreddit = await reddit.subreddit(subreddit_name)
                 logger.debug(f"Buscando em r/{subreddit.display_name} por '{query}'")
 
-                # Usar o método search() do Reddit para resultados mais precisos
                 async for submission in subreddit.search(
                     query=query, sort="relevance", limit=10
                 ):
@@ -86,15 +77,14 @@ async def scrape_reddit(query: str):
                         }
                     )
 
-                # Se já temos 10 resultados, podemos parar de buscar em outros subreddits
                 if len(results) >= 10:
                     break
 
-            except NotFound:
+            except asyncprawcore.exceptions.NotFound:
                 logger.warning(
                     f"Subreddit 'r/{subreddit_name}' não encontrado. Pulando para o próximo."
                 )
-                continue  # Continua para o próximo subreddit na lista
+                continue
             except Exception as e:
                 logger.error(
                     f"Erro inesperado ao buscar posts no r/{subreddit_name}: {e}"
@@ -103,101 +93,71 @@ async def scrape_reddit(query: str):
         logger.info(f"Encontrados {len(results)} resultados do Reddit para '{query}'.")
         return results
 
-    except RedditForbidden as e:
-        logger.error(
-            f"Erro ao buscar posts do Reddit: {e}. Verifique suas credenciais REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET e REDDIT_USER_AGENT."
-        )
-        return []
     except Exception as e:
         logger.error(
-            f"Erro inesperado ao buscar posts do Reddit para '{query}': {e}",
-            exc_info=True,
+            f"Erro ao buscar posts no Reddit para '{query}': {e}", exc_info=True
         )
         return []
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_fixed(2),
-    retry=retry_if_exception_type(requests.exceptions.RequestException),
+    stop=stop_after_attempt(5),
+    wait=wait_random_exponential(min=1, max=60),
+    retry=retry_if_exception_type(Exception),
 )
-def scrape_newsapi(query):
+def scrape_newsapi(query: str):
     """
-    Busca artigos de notícias relevantes usando a NewsAPI.
+    Busca artigos de notícias usando a NewsAPI.
     Retorna uma lista de dicionários com 'title', 'url' e 'content'.
     """
-    logger.info(f"Buscando artigos do NewsAPI para: '{query}'")
+    logger.info(f"Buscando notícias na NewsAPI para: '{query}'")
     results = []
     try:
-        # Busca artigos em português, inglês e espanhol
-        languages = ["pt", "en", "es"]
-        for lang in languages:
-            top_headlines = newsapi.get_everything(
-                q=query,
-                language=lang,
-                sort_by="relevancy",
-                page_size=10,  # Limitar a 10 resultados por idioma
+        response = newsapi.get_everything(
+            q=query,
+            language="en",
+            sort_by="relevancy",
+            page_size=10,
+        )
+        for article in response.get("articles", []):
+            results.append(
+                {
+                    "title": article.get("title", ""),
+                    "url": article.get("url", ""),
+                    "content": article.get("description", "")
+                    or article.get("content", "")[:200],
+                }
             )
-            for article in top_headlines.get("articles", []):
-                if article.get("title") and article.get("description"):
-                    results.append(
-                        {
-                            "title": article["title"],
-                            "url": article["url"],
-                            "content": article[
-                                "description"
-                            ],  # NewsAPI geralmente tem descrição
-                        }
-                    )
-            if len(results) >= 20:  # Limitar total de resultados para não sobrecarregar
-                break
-
-        logger.info(f"Encontrados {len(results)} resultados do NewsAPI para '{query}'.")
+        logger.info(f"Encontrados {len(results)} resultados da NewsAPI para '{query}'.")
         return results
     except Exception as e:
-        logger.error(
-            f"Erro ao buscar artigos do NewsAPI para '{query}': {e}", exc_info=True
-        )
+        logger.error(f"Erro ao buscar na NewsAPI para '{query}': {e}", exc_info=True)
         return []
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_fixed(2),
-    retry=retry_if_exception_type(requests.exceptions.RequestException),
+    stop=stop_after_attempt(5),
+    wait=wait_random_exponential(min=1, max=60),
+    retry=retry_if_exception_type(Exception),
 )
-def scrape_serper(query):
+def scrape_serper(query: str):
     """
-    Realiza uma busca no Google usando SerpApi para encontrar artigos e informações.
+    Busca resultados no Google usando a API do SerpApi via requests.
     Retorna uma lista de dicionários com 'title', 'url' e 'content'.
     """
     logger.info(f"Buscando no Google via SerpApi para: '{query}'")
     results = []
+    url = "https://serpapi.com/search"
+    params = {
+        "api_key": Config.SERPER_API_KEY,
+        "q": query,
+        "num": 10,
+        "tbm": "nws",  # Busca apenas notícias
+    }
     try:
-        params = {
-            "q": query,
-            "api_key": Config.SERPER_API_KEY,
-            "hl": "pt",  # Idioma da interface de busca
-            "gl": "br",  # País da busca
-            "num": 20,  # Número de resultados
-        }
-        search = GoogleSearch(params)
-        data = search.get_dict()
-
-        # Processar resultados de 'organic_results'
-        for result in data.get("organic_results", []):
-            if result.get("title") and result.get("snippet") and result.get("link"):
-                results.append(
-                    {
-                        "title": result["title"],
-                        "url": result["link"],
-                        "content": result["snippet"],
-                    }
-                )
-            if len(results) >= 15:  # Limitar a 15 resultados
-                break
-
-        # Opcional: Processar resultados de 'news_results' se houver
+        response = requests.get(url, params=params, timeout=Config.REQUEST_TIMEOUT)
+        response.raise_for_status()
+        data = response.json()
         for result in data.get("news_results", []):
             if result.get("title") and result.get("snippet") and result.get("link"):
                 results.append(
@@ -209,7 +169,6 @@ def scrape_serper(query):
                 )
             if len(results) >= 25:  # Limitar total de resultados
                 break
-
         logger.info(f"Encontrados {len(results)} resultados do SerpApi para '{query}'.")
         return results
     except Exception as e:
@@ -229,19 +188,14 @@ async def scrape_sources(theme):
     all_raw_material = []
     all_source_urls = []
 
-    # Executar scraping de forma concorrente
-    # Note que scrape_reddit é async, enquanto newsapi e serper são síncronos (usando requests)
-    # Para executá-los em paralelo com asyncio, usamos loop.run_in_executor para os síncronos.
     loop = asyncio.get_event_loop()
-
     tasks = []
     tasks.append(scrape_reddit(theme))
     tasks.append(loop.run_in_executor(None, scrape_newsapi, theme))
     tasks.append(loop.run_in_executor(None, scrape_serper, theme))
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)  # Captura exceções
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Processar resultados do Reddit
     reddit_results = results[0]
     if isinstance(reddit_results, list):
         for item in reddit_results:
@@ -252,7 +206,6 @@ async def scrape_sources(theme):
     elif isinstance(reddit_results, Exception):
         logger.error(f"Erro ao obter resultados do Reddit: {reddit_results}")
 
-    # Processar resultados do NewsAPI
     newsapi_results = results[1]
     if isinstance(newsapi_results, list):
         for item in newsapi_results:
@@ -263,7 +216,6 @@ async def scrape_sources(theme):
     elif isinstance(newsapi_results, Exception):
         logger.error(f"Erro ao obter resultados do NewsAPI: {newsapi_results}")
 
-    # Processar resultados do SerpApi
     serper_results = results[2]
     if isinstance(serper_results, list):
         for item in serper_results:
@@ -275,7 +227,7 @@ async def scrape_sources(theme):
         logger.error(f"Erro ao obter resultados do SerpApi: {serper_results}")
 
     compiled_text = "\n\n".join(all_raw_material)
-    unique_source_urls = list(set(all_source_urls))  # Remover URLs duplicadas
+    unique_source_urls = list(set(all_source_urls))
 
     logger.info(
         f"Scraping concluído para '{theme}'. Total de material: {len(compiled_text)} caracteres. Total de URLs únicas: {len(unique_source_urls)}"
