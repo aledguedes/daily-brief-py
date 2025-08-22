@@ -89,7 +89,7 @@ class TriggerRequest(BaseModel):
 
 
 class TriggerResponse(BaseModel):
-    trigger_id: int
+    trigger_id: str
     message: str
     task_id: str
     status: str

@@ -120,7 +120,7 @@ class TriggerRequest(BaseModel):
 
 
 class TriggerResponse(BaseModel):
-    trigger_id: Optional[int] = None
+    trigger_id: Optional[str] = None
     message: str
     task_id: str
     status: str
@@ -335,13 +335,14 @@ async def submit_final_post(
     user: dict = Depends(Auth.verify_token),
 ):
     try:
-        headers = {"Authorization": f"Bearer {user['payload'].get('token')}"}
+        # Acessa o token diretamente do dicionário retornado por Auth.verify_token
+        # Se a chave 'token' estiver presente
+        headers = {"Authorization": f"Bearer {user.get('token')}"}
         response = await send_post(request.post_data, headers)
 
         if request.task_id_to_delete:
-            db_service.delete_material(
-                user["payload"]["sub"], request.task_id_to_delete
-            )
+            # Acessa o user_id diretamente da chave 'sub'
+            db_service.delete_material(user.get("sub"), request.task_id_to_delete)
             logger.info(
                 f"Task {request.task_id_to_delete} deletada após envio do post."
             )
@@ -364,12 +365,14 @@ async def get_task_result(
     user: dict = Depends(Auth.verify_token),
 ):
     try:
-        material = db_service.get_material(user["payload"]["sub"], task_id)
+        # Acessa o user_id diretamente da chave 'sub'
+        material = db_service.get_material(user.get("sub"), task_id)
         if not material:
             raise HTTPException(status_code=404, detail="Task não encontrada")
 
         return MaterialResponse(
-            user_id=user["payload"]["sub"],
+            # Acessa o user_id diretamente da chave 'sub'
+            user_id=user.get("sub"),
             automation_request_id=material.get("automation_request_id"),
             task_id=task_id,
             status=material.get("status"),
@@ -416,7 +419,7 @@ async def process_material_task(
     task_id: str,
 ):
     """Processa materiais brutos para gerar conteúdo e enviar ao backend."""
-    user_id = user["payload"]["sub"]
+    user_id = user.get("sub")
     try:
         material = db_service.get_material(user_id, task_id)
         if not material or not material.get("raw_material_ids"):
@@ -489,13 +492,31 @@ async def trigger_by_url(
     request: UrlRequest,
     background_tasks: BackgroundTasks,
     user: dict = Depends(Auth.verify_token),
-    db: Session = Depends(get_db),
 ):
+    """
+    Aciona a automação para uma URL, extraindo o conteúdo e iniciando
+    a tarefa de geração em segundo plano.
+    """
     task_id = str(uuid.uuid4())
-    user_id = user["payload"]["sub"]
+    user_id = user.get("sub")
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found in token")
+
     try:
+        # Cria a requisição de automação no banco de dados.
+        automation_request_id = db_service.create_automation_request(
+            user_id=user_id,
+            task_id=task_id,
+            url=str(request.url),
+            theme=request.theme,
+            output_format=request.content_type,
+        )
+
+        # Inicia a coleta de material em uma tarefa em segundo plano.
         content = await fetch_url_content(str(request.url))
         if not content:
+            # Em caso de falha na coleta, atualiza o status no banco de dados.
             db_service.update_material_status(user_id, task_id, "COLLECTION_FAILED")
             raise HTTPException(
                 status_code=400, detail="Nenhum conteúdo extraído da URL"
@@ -506,43 +527,26 @@ async def trigger_by_url(
             db_service.update_material_status(user_id, task_id, "COLLECTION_FAILED")
             raise HTTPException(status_code=400, detail="Conteúdo limpo inválido")
 
-        db_service.save_material(
+        # Salva o material bruto no banco de dados.
+        raw_id = db_service.save_raw_material(
             user_id=user_id,
-            automation_request_id=None,
             task_id=task_id,
-            status="PENDING_COLLECTION",
-            theme=request.theme,
-            content_type=request.content_type,
+            url=str(request.url),
+            content=cleaned_content,
         )
-
-        raw_id = db_service.save_raw_material(task_id, cleaned_content)
-        db_service.update_material_raw_material_ids(user_id, task_id, [raw_id])
+        # CORREÇÃO AQUI: Adicionando o user_id na chamada.
         db_service.update_material_status(user_id, task_id, "RAW_COLLECTED")
 
-        request_id = str(uuid.uuid4())
-        request_details = {
-            "url": str(request.url),
-            "theme": request.theme,
-            "content_type": request.content_type,
-        }
-        automation_request = await db_service.create_automation_request(
-            db=db,
-            request_id=request_id,
-            user_id=user_id,
-            request_type="URL_TRIGGER",
-            request_details=request_details,
-            status="PENDING",
-        )
-
+        # Adiciona a tarefa de processamento em segundo plano.
         background_tasks.add_task(
             process_material_task,
             user=user,
-            automation_request_id=automation_request.id,
+            automation_request_id=automation_request_id,
             task_id=task_id,
         )
 
         return TriggerResponse(
-            trigger_id=automation_request.id,
+            trigger_id=task_id,
             message=f"Automação acionada para URL {request.url}.",
             task_id=task_id,
             status="PENDING_GENERATION",
