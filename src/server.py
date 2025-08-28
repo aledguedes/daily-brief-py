@@ -81,6 +81,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Incluir rotas do api.py
+app.include_router(api_router, prefix="/api")
+
 
 # Modelos Pydantic
 class TriggerRequest(BaseModel):
@@ -109,10 +112,6 @@ async def startup_event():
             f"Erro ao inicializar o banco de dados SQLite: {e}", exc_info=True
         )
         raise
-
-
-# Incluir rotas do api.py
-app.include_router(api_router, prefix="/api")
 
 
 @app.get(

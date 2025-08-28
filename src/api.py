@@ -1,4 +1,5 @@
 # src/api.py
+import sqlite3
 import requests
 import logging
 import json
@@ -20,6 +21,7 @@ import os
 from src.config import Config
 from src.auth import Auth
 import src.database_service as db_service
+from src.database_service import AsyncDatabaseManager, DB_FILE
 from src.scraping_service import (
     fetch_url_content,
     clean_html_content,
@@ -415,87 +417,103 @@ async def generate_image(
 
 async def process_material_task(
     user: dict,
-    automation_request_id: Optional[int],
+    automation_request_id: Optional[str],
     task_id: str,
 ):
-    """Processa materiais brutos para gerar conteúdo e enviar ao backend."""
+    """
+    Processa o material bruto e gera o conteúdo final.
+    """
     user_id = user.get("sub")
+    if not user_id:
+        logger.error("User ID not found in token")
+        return
+
     try:
-        material = db_service.get_material(user_id, task_id)
-        if not material or not material.get("raw_material_ids"):
-            logger.error(f"Nenhum material bruto encontrado para task_id {task_id}")
-            db_service.update_material_status(user_id, task_id, "FAILED_NO_MATERIAL")
-            return
+        # Usar o gerenciador de contexto para a conexão
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            material = db_service.get_material(conn=conn, user_id=user_id, task_id=task_id)
+            if not material or not material.get("raw_material_ids"):
+                logger.error(f"Nenhum material bruto encontrado para task_id {task_id}")
+                db_service.update_material_status(conn=conn, user_id=user_id, task_id=task_id, new_status="FAILED_NO_MATERIAL")
+                return
 
-        raw_materials = []
-        for raw_id in material["raw_material_ids"]:
-            content = db_service.get_raw_material(raw_id)
-            if content:
-                raw_materials.append(content)
+            raw_materials = []
+            # CORREÇÃO: Transforma a string de IDs em uma lista
+            raw_id_list = material["raw_material_ids"].replace(" ", "").split(",")
 
-        if not raw_materials:
-            logger.error(f"Nenhum conteúdo válido para task_id {task_id}")
-            db_service.update_material_status(user_id, task_id, "FAILED_NO_CONTENT")
-            return
+            for raw_id in raw_id_list:
+                # Garante que o ID não está vazio
+                if raw_id:
+                    content = db_service.get_raw_material(conn=conn, raw_material_id=raw_id)
+                    if content and content.get("content"):
+                        raw_materials.append(content.get("content"))
 
-        compiled_raw_material = "\n\n".join(raw_materials)[: Config.MAX_TEXT_LEN]
-        theme = material.get("theme", "Desconhecido")
-        content_type = material.get("content_type", Config.OUTPUT_FORMAT)
+            if not raw_materials:
+                logger.error(f"Nenhum conteúdo válido para task_id {task_id}")
+                db_service.update_material_status(conn=conn, user_id=user_id, task_id=task_id, new_status="FAILED_NO_CONTENT")
+                return
 
+            compiled_raw_material = "\n\n".join(raw_materials)
+
+            # Limita o tamanho do material bruto para evitar excesso de tokens
+            max_text_len = 10000
+            if len(compiled_raw_material) > max_text_len:
+                compiled_raw_material = compiled_raw_material[:max_text_len]
+
+            theme = material.get("theme", "Desconhecido")
+            content_type = material.get("content_type", "article")
+
+            db_service.update_material_status(conn=conn, user_id=user_id, task_id=task_id, new_status="PENDING_GENERATION")
+
+        # Gerar conteúdo fora do contexto do banco de dados para evitar bloqueio durante operações longas
         generated_data = await generate_content_with_gemini_service(
             theme=theme,
             raw_material=compiled_raw_material,
             content_type=content_type,
         )
 
-        db_service.save_material(
-            user_id=user_id,
-            automation_request_id=automation_request_id,
-            task_id=task_id,
-            status="GENERATED",
-            theme=theme,
-            content_type=content_type,
-            raw_material_ids=material["raw_material_ids"],
-            generated_content=json.dumps(generated_data, ensure_ascii=False),
-            suggested_image_prompt=generated_data.get("suggested_image_prompt"),
-        )
+        # Abrir nova conexão para salvar o resultado
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            db_service.save_material(
+                conn=conn,
+                user_id=user_id,
+                automation_request_id=automation_request_id,
+                task_id=task_id,
+                status="GENERATED",
+                theme=theme,
+                content_type=content_type,
+                raw_material_ids=material["raw_material_ids"],
+                generated_content=json.dumps(generated_data, ensure_ascii=False),
+                suggested_image_prompt=generated_data.get("suggested_image_prompt"),
+            )
 
-        headers = {"Authorization": f"Bearer {user['payload'].get('token')}"}
-        post_response = await send_post(generated_data, headers)
+        # Removendo a chamada para o backend de logs e para o envio de post
+        # headers = {"Authorization": f"Bearer {user['payload'].get('token')}"}
+        # await send_post(generated_data, headers)
 
-        db_service.update_material_status(user_id, task_id, "POSTED")
-        logger.info(f"Post enviado para task_id {task_id}")
+        # db_service.update_material_status(user_id, task_id, "POSTED")
+        # logger.info(f"Post enviado para task_id {task_id}")
 
     except Exception as e:
         logger.error(f"Erro ao processar material para task_id {task_id}: {str(e)}")
         db_service.update_material_status(user_id, task_id, "FAILED_GENERATION")
-        if Config.LOGS_API_URL:
-            log_data = {
-                "action": f"Erro ao processar material para task_id {task_id}: {str(e)}",
-                "timestamp": datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", ""),
-                "level": "ERROR",
-                "report_id": task_id,
-            }
-            send_logs_to_backend(log_data)
 
 
+# Rota para salvar o material bruto, sem disparar a automação
 @router.post(
     "/trigger-by-url",
     response_model=TriggerResponse,
     tags=["Automação"],
     summary="Acionar automação por URL",
-    description="Extrai conteúdo de uma URL específica e inicia a geração de conteúdo em segundo plano.",
+    description="Extrai conteúdo de uma URL específica e salva o material bruto sem iniciar a geração.",
 )
 async def trigger_by_url(
     request: UrlRequest,
-    background_tasks: BackgroundTasks,
     user: dict = Depends(Auth.verify_token),
 ):
     """
-    Aciona a automação para uma URL, extraindo o conteúdo e iniciando
-    a tarefa de geração em segundo plano.
+    Aciona a automação para uma URL, extraindo o conteúdo e salvando
+    a tarefa para ser processada posteriormente.
     """
     task_id = str(uuid.uuid4())
     user_id = user.get("sub")
@@ -504,58 +522,112 @@ async def trigger_by_url(
         raise HTTPException(status_code=401, detail="User ID not found in token")
 
     try:
-        # Cria a requisição de automação no banco de dados.
-        automation_request_id = db_service.create_automation_request(
-            user_id=user_id,
-            task_id=task_id,
-            url=str(request.url),
-            theme=request.theme,
-            output_format=request.content_type,
-        )
-
-        # Inicia a coleta de material em uma tarefa em segundo plano.
-        content = await fetch_url_content(str(request.url))
-        if not content:
-            # Em caso de falha na coleta, atualiza o status no banco de dados.
-            db_service.update_material_status(user_id, task_id, "COLLECTION_FAILED")
-            raise HTTPException(
-                status_code=400, detail="Nenhum conteúdo extraído da URL"
+        # Usar uma única conexão para todas as operações e garantir que ela seja fechada corretamente
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            # Passa a conexão `conn` para as funções de serviço
+            automation_request_id = db_service.create_automation_request(
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                url=str(request.url),
+                theme=request.theme,
+                output_format=request.content_type,
             )
 
-        cleaned_content = clean_html_content(content)
-        if not cleaned_content:
-            db_service.update_material_status(user_id, task_id, "COLLECTION_FAILED")
-            raise HTTPException(status_code=400, detail="Conteúdo limpo inválido")
+            content = await fetch_url_content(str(request.url))
+            if not content:
+                db_service.update_material_status(
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    new_status="COLLECTION_FAILED",
+                )
+                raise HTTPException(
+                    status_code=400, detail="Nenhum conteúdo extraído da URL"
+                )
 
-        # Salva o material bruto no banco de dados.
-        raw_id = db_service.save_raw_material(
-            user_id=user_id,
-            task_id=task_id,
-            url=str(request.url),
-            content=cleaned_content,
-        )
-        # CORREÇÃO AQUI: Adicionando o user_id na chamada.
-        db_service.update_material_status(user_id, task_id, "RAW_COLLECTED")
+            cleaned_content = clean_html_content(content)
+            if not cleaned_content:
+                db_service.update_material_status(
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    new_status="COLLECTION_FAILED",
+                )
+                raise HTTPException(status_code=400, detail="Conteúdo limpo inválido")
 
-        # Adiciona a tarefa de processamento em segundo plano.
-        background_tasks.add_task(
-            process_material_task,
-            user=user,
-            automation_request_id=automation_request_id,
-            task_id=task_id,
-        )
+            raw_id = db_service.save_raw_material(
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                url=str(request.url),
+                content=cleaned_content,
+            )
+
+            db_service.update_material_with_raw_id(
+                conn=conn, task_id=task_id, raw_material_id=raw_id
+            )
+
+            db_service.update_material_status(
+                conn=conn, user_id=user_id, task_id=task_id, new_status="RAW_COLLECTED"
+            )
 
         return TriggerResponse(
-            trigger_id=task_id,
-            message=f"Automação acionada para URL {request.url}.",
+            message=f"Material bruto salvo com sucesso. A tarefa está pronta para ser processada. Use o task_id para iniciar a geração.",
             task_id=task_id,
-            status="PENDING_GENERATION",
+            status="RAW_MATERIAL_SAVED",
         )
     except Exception as e:
         logger.error(f"Erro ao acionar automação por URL: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Erro ao acionar automação: {str(e)}"
         )
+
+
+# Rota para disparar a geração de conteúdo
+@router.post(
+    "/generate/{task_id}",
+    tags=["Automação"],
+    summary="Gerar conteúdo sob demanda",
+    description="Inicia a tarefa de geração de conteúdo para um task_id existente.",
+)
+async def generate_content_api(
+    task_id: str,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(Auth.verify_token),
+):
+    """
+    Inicia a tarefa de segundo plano para gerar conteúdo.
+    """
+    try:
+        user_id = user.get("sub")
+        # Usar o gerenciador de contexto para a conexão
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            # Passa a conexão `conn` para a função de serviço
+            material = db_service.get_material(conn=conn, user_id=user_id, task_id=task_id)
+            
+            if not material:
+                raise HTTPException(status_code=404, detail="Task ID not found.")
+
+        # Dispara a tarefa de segundo plano
+        background_tasks.add_task(
+            process_material_task,
+            user=user,
+            automation_request_id=material.get("automation_request_id"),
+            task_id=task_id,
+        )
+
+        logger.info(f"Tarefa de geração de conteúdo para {task_id} iniciada.")
+
+        return {
+            "message": f"Tarefa de geração de conteúdo para {task_id} iniciada com sucesso. Verifique o status para o resultado."
+        }
+    except HTTPException as e:
+        logger.error(f"Erro HTTP na API: {e.detail}")
+        raise
+    except Exception as e:
+        logger.error(f"Erro ao iniciar a tarefa de geração para {task_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Erro interno no servidor.")
 
 
 @router.post(

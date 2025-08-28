@@ -48,3 +48,9 @@ Thumbs.db
 # Outros arquivos que não deseja versionar
 *.bak
 *.swp
+
+# Arquivos de banco de dados
+*.db
+*.sqlite
+*.sqlite3
+dailyBrief.db
