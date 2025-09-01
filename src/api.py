@@ -21,7 +21,7 @@ import os
 from src.config import Config
 from src.auth import Auth
 import src.database_service as db_service
-from src.database_service import AsyncDatabaseManager, DB_FILE
+from src.database_service import AsyncDatabaseManager, DB_FILE, get_db_connection
 from src.scraping_service import (
     fetch_url_content,
     clean_html_content,
@@ -36,6 +36,11 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class RawContentResponse(BaseModel):
+    raw_content: str
+
 
 # Configuração da API Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -104,7 +109,7 @@ class AutomationRequestDetails(BaseModel):
 
 class MaterialResponse(BaseModel):
     user_id: str
-    automation_request_id: Optional[int] = None
+    automation_request_id: Optional[Union[int, str]] = None
     task_id: str
     status: str
     theme: Optional[str] = None
@@ -343,11 +348,15 @@ async def submit_final_post(
         response = await send_post(request.post_data, headers)
 
         if request.task_id_to_delete:
-            # Acessa o user_id diretamente da chave 'sub'
-            db_service.delete_material(user.get("sub"), request.task_id_to_delete)
-            logger.info(
-                f"Task {request.task_id_to_delete} deletada após envio do post."
-            )
+            # Usa AsyncDatabaseManager para gerenciar a conexão
+            async with AsyncDatabaseManager(DB_FILE) as conn:
+                # Acessa o user_id diretamente da chave 'sub'
+                db_service.delete_material(
+                    conn, user.get("sub"), request.task_id_to_delete
+                )
+                logger.info(
+                    f"Task {request.task_id_to_delete} deletada após envio do post."
+                )
 
         return {"message": "Post enviado com sucesso!", "response": response}
     except Exception as e:
@@ -367,28 +376,73 @@ async def get_task_result(
     user: dict = Depends(Auth.verify_token),
 ):
     try:
-        # Acessa o user_id diretamente da chave 'sub'
-        material = db_service.get_material(user.get("sub"), task_id)
-        if not material:
-            raise HTTPException(status_code=404, detail="Task não encontrada")
-
-        return MaterialResponse(
+        # Usa AsyncDatabaseManager para gerenciar a conexão
+        async with AsyncDatabaseManager(DB_FILE) as conn:
             # Acessa o user_id diretamente da chave 'sub'
-            user_id=user.get("sub"),
-            automation_request_id=material.get("automation_request_id"),
-            task_id=task_id,
-            status=material.get("status"),
-            theme=material.get("theme"),
-            content_type=material.get("content_type"),
-            raw_material=material.get("raw_material"),
-            generated_content=material.get("generated_content"),
-            suggested_image_prompt=material.get("suggested_image_prompt"),
-            created_at=material.get("created_at"),
-            updated_at=material.get("updated_at"),
-        )
+            material = db_service.get_material(conn, user.get("sub"), task_id)
+            if not material:
+                raise HTTPException(status_code=404, detail="Task não encontrada")
+
+            response = MaterialResponse(
+                # Acessa o user_id diretamente da chave 'sub'
+                user_id=user.get("sub"),
+                automation_request_id=material.get("automation_request_id"),
+                task_id=task_id,
+                status=material.get("status"),
+                theme=material.get("theme"),
+                content_type=material.get("content_type"),
+                raw_material=material.get("raw_material"),
+                generated_content=material.get("generated_content"),
+                suggested_image_prompt=material.get("suggested_image_prompt"),
+                created_at=material.get("created_at"),
+                updated_at=material.get("updated_at"),
+            )
+            return response
     except Exception as e:
         logger.error(f"Erro ao obter resultado da task {task_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Erro ao obter task: {str(e)}")
+
+
+@router.get(
+    "/list_user_materials",
+    response_model=List[MaterialResponse],
+    tags=["Automação"],
+    summary="Listar materiais do usuário",
+    description="Retorna todos os materiais associados ao usuário autenticado.",
+)
+async def list_user_materials(
+    user: dict = Depends(Auth.verify_token),
+):
+    try:
+        # Usa AsyncDatabaseManager para gerenciar a conexão
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            # Acessa o user_id diretamente da chave 'sub'
+            materials = db_service.list_user_materials(conn, user.get("sub"))
+            if not materials:
+                return []
+
+            response = [
+                MaterialResponse(
+                    user_id=material.get("user_id"),
+                    automation_request_id=material.get("automation_request_id"),
+                    task_id=material.get("task_id"),
+                    status=material.get("status"),
+                    theme=material.get("theme"),
+                    content_type=material.get("content_type"),
+                    raw_material=material.get("raw_material"),
+                    generated_content=material.get("generated_content"),
+                    suggested_image_prompt=material.get("suggested_image_prompt"),
+                    created_at=material.get("created_at"),
+                    updated_at=material.get("updated_at"),
+                )
+                for material in materials
+            ]
+            return response
+    except Exception as e:
+        logger.error(f"Erro ao listar materiais do usuário: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Erro ao listar materiais: {str(e)}"
+        )
 
 
 @router.post(
@@ -431,10 +485,17 @@ async def process_material_task(
     try:
         # Usar o gerenciador de contexto para a conexão
         async with AsyncDatabaseManager(DB_FILE) as conn:
-            material = db_service.get_material(conn=conn, user_id=user_id, task_id=task_id)
+            material = db_service.get_material(
+                conn=conn, user_id=user_id, task_id=task_id
+            )
             if not material or not material.get("raw_material_ids"):
                 logger.error(f"Nenhum material bruto encontrado para task_id {task_id}")
-                db_service.update_material_status(conn=conn, user_id=user_id, task_id=task_id, new_status="FAILED_NO_MATERIAL")
+                db_service.update_material_status(
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    new_status="FAILED_NO_MATERIAL",
+                )
                 return
 
             raw_materials = []
@@ -444,13 +505,20 @@ async def process_material_task(
             for raw_id in raw_id_list:
                 # Garante que o ID não está vazio
                 if raw_id:
-                    content = db_service.get_raw_material(conn=conn, raw_material_id=raw_id)
+                    content = db_service.get_raw_material(
+                        conn=conn, raw_material_id=raw_id
+                    )
                     if content and content.get("content"):
                         raw_materials.append(content.get("content"))
 
             if not raw_materials:
                 logger.error(f"Nenhum conteúdo válido para task_id {task_id}")
-                db_service.update_material_status(conn=conn, user_id=user_id, task_id=task_id, new_status="FAILED_NO_CONTENT")
+                db_service.update_material_status(
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    new_status="FAILED_NO_CONTENT",
+                )
                 return
 
             compiled_raw_material = "\n\n".join(raw_materials)
@@ -463,7 +531,12 @@ async def process_material_task(
             theme = material.get("theme", "Desconhecido")
             content_type = material.get("content_type", "article")
 
-            db_service.update_material_status(conn=conn, user_id=user_id, task_id=task_id, new_status="PENDING_GENERATION")
+            db_service.update_material_status(
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status="PENDING_GENERATION",
+            )
 
         # Gerar conteúdo fora do contexto do banco de dados para evitar bloqueio durante operações longas
         generated_data = await generate_content_with_gemini_service(
@@ -604,8 +677,10 @@ async def generate_content_api(
         # Usar o gerenciador de contexto para a conexão
         async with AsyncDatabaseManager(DB_FILE) as conn:
             # Passa a conexão `conn` para a função de serviço
-            material = db_service.get_material(conn=conn, user_id=user_id, task_id=task_id)
-            
+            material = db_service.get_material(
+                conn=conn, user_id=user_id, task_id=task_id
+            )
+
             if not material:
                 raise HTTPException(status_code=404, detail="Task ID not found.")
 
@@ -770,3 +845,24 @@ async def generate_content(
         logger.error(f"Erro na geração de conteúdo para task_id {task_id}: {str(e)}")
         db_service.update_material_status(user_id, task_id, "FAILED_GENERATION")
         raise HTTPException(status_code=500, detail=f"Erro na geração: {str(e)}")
+
+
+@router.get(
+    "/raw-material/{raw_material_id}",
+    tags=["Automação"],
+    summary="Busca material bruto a partir do seu ID",
+    description="Retorna o conteúdo bruto de uma URL para revisão, usando o ID do material.",
+    response_model=Dict[str, str],
+)
+async def get_raw_material(
+    raw_material_id: str, conn: sqlite3.Connection = Depends(get_db_connection)
+):
+    """
+    Busca o conteúdo bruto de uma URL a partir do ID do material.
+    """
+    raw_material = db_service.get_raw_material_by_id(conn, raw_material_id)
+
+    if not raw_material:
+        raise HTTPException(status_code=404, detail="Material bruto não encontrado.")
+
+    return {"raw_content": raw_material.get("content")}

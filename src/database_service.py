@@ -414,3 +414,35 @@ def get_selectors(conn: sqlite3.Connection, user_id: str) -> List[Dict]:
     except Exception as e:
         logger.error(f"Erro ao buscar seletores para o user_id: {user_id}: {str(e)}")
         return []
+
+
+def list_user_materials(conn: sqlite3.Connection, user_id: str) -> List[Dict]:
+    """
+    Lista todos os materiais associados a um user_id. Recebe a conexão como parâmetro.
+    """
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM materials WHERE user_id = ?", (user_id,))
+        materials = [dict(row) for row in cursor.fetchall()]
+        return materials
+    except Exception as e:
+        logger.error(f"Erro ao listar materiais para o user_id: {user_id}: {str(e)}")
+        return []
+
+
+def get_raw_material_by_id(
+    conn: sqlite3.Connection, raw_material_id: str
+) -> Optional[Dict]:
+    """
+    Busca o conteúdo bruto de uma URL a partir do seu ID.
+    """
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM raw_materials WHERE id = ?", (raw_material_id,))
+        raw_material = cursor.fetchone()
+        return dict(raw_material) if raw_material else None
+    except Exception as e:
+        logger.error(
+            f"Erro ao buscar material bruto para o ID: {raw_material_id}: {str(e)}"
+        )
+        return None
