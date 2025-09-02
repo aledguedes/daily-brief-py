@@ -42,6 +42,10 @@ class RawContentResponse(BaseModel):
     raw_content: str
 
 
+class RawMaterialsListResponse(BaseModel):
+    raw_materials: List[Dict[str, Any]]
+
+
 # Configuração da API Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
@@ -560,13 +564,6 @@ async def process_material_task(
                 suggested_image_prompt=generated_data.get("suggested_image_prompt"),
             )
 
-        # Removendo a chamada para o backend de logs e para o envio de post
-        # headers = {"Authorization": f"Bearer {user['payload'].get('token')}"}
-        # await send_post(generated_data, headers)
-
-        # db_service.update_material_status(user_id, task_id, "POSTED")
-        # logger.info(f"Post enviado para task_id {task_id}")
-
     except Exception as e:
         logger.error(f"Erro ao processar material para task_id {task_id}: {str(e)}")
         db_service.update_material_status(user_id, task_id, "FAILED_GENERATION")
@@ -866,3 +863,25 @@ async def get_raw_material(
         raise HTTPException(status_code=404, detail="Material bruto não encontrado.")
 
     return {"raw_content": raw_material.get("content")}
+
+
+@router.get(
+    "/raw-materials-by-task/{task_id}",
+    summary="Busca todos os materiais brutos de uma tarefa",
+    description="Retorna o conteúdo de todas as URLs de uma única requisição de automação.",
+    response_model=RawMaterialsListResponse,
+)
+async def get_raw_materials_by_task(
+    task_id: str, conn: sqlite3.Connection = Depends(get_db_connection)
+):
+    """
+    Busca todos os materiais brutos associados a um task_id.
+    """
+    material = db_service.get_material_by_task_id(conn, task_id)
+    if not material:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+
+    raw_material_ids = material.get("raw_material_ids", [])
+    raw_materials = db_service.get_raw_materials_by_ids(conn, raw_material_ids)
+
+    return {"raw_materials": raw_materials}

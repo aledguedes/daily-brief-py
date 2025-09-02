@@ -446,3 +446,25 @@ def get_raw_material_by_id(
             f"Erro ao buscar material bruto para o ID: {raw_material_id}: {str(e)}"
         )
         return None
+
+
+def get_raw_materials_by_ids(
+    conn: sqlite3.Connection, raw_material_ids: List[str]
+) -> List[Dict]:
+    """
+    Busca o conteúdo de vários materiais brutos a partir de uma lista de IDs.
+    """
+    if not raw_material_ids:
+        return []
+    try:
+        placeholders = ",".join("?" for _ in raw_material_ids)
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT * FROM raw_materials WHERE id IN ({placeholders})",
+            raw_material_ids,
+        )
+        raw_materials = cursor.fetchall()
+        return [dict(row) for row in raw_materials]
+    except Exception as e:
+        logger.error(f"Erro ao buscar materiais brutos: {str(e)}")
+        return []
