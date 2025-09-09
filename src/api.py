@@ -32,6 +32,7 @@ from src.database import get_db
 from src.models import AutomationRequest
 from src.utils import send_logs_to_backend
 from sqlalchemy.orm import Session
+import src.postgresql_service as pg_service
 
 logger = logging.getLogger(__name__)
 
@@ -709,7 +710,15 @@ async def generate_content_api(
     summary="Extrair conteúdo de múltiplas URLs",
     description="Extrai conteúdo de uma lista de URLs, salva em raw_materials e inicia geração em segundo plano.",
 )
-async def extract_from_urls(
+# Adicione este código em src/api.py
+@router.post(
+    "/trigger-multiple-urls",
+    response_model=TriggerResponse,
+    tags=["Automação"],
+    summary="Extrair conteúdo de múltiplas URLs",
+    description="Extrai conteúdo de uma lista de URLs, salva em raw_materials e inicia a geração em segundo plano.",
+)
+async def trigger_multiple_urls(
     request: ExtractFromUrlsRequest,
     background_tasks: BackgroundTasks,
     user: dict = Depends(Auth.verify_token),
@@ -885,3 +894,277 @@ async def get_raw_materials_by_task(
     raw_materials = db_service.get_raw_materials_by_ids(conn, raw_material_ids)
 
     return {"raw_materials": raw_materials}
+
+
+# Modelo Pydantic para o corpo da requisição
+class ContentInput(BaseModel):
+    user_id: str
+    text_content: str
+    content_type: str = "artigo"
+    theme: str = "tema_padrao"  # Opcional, será sobrescrito pela IA
+
+
+@router.post(
+    "/trigger-by-text",
+    tags=["Automação"],
+    summary="Inicia automação a partir de um texto",
+    description="Recebe um texto, extrai um tema com a IA, salva no banco e prepara a automação.",
+    status_code=200,
+)
+async def trigger_by_text(
+    payload: ContentInput, conn: sqlite3.Connection = Depends(get_db_connection)
+):
+    """
+    Recebe um texto de matéria, extrai um tema com o Gemini,
+    salva o material bruto no SQLite e os metadados no PostgreSQL.
+    """
+    logger.info("Nova requisição recebida na rota /api/trigger-by-text")
+
+    try:
+        # 1. Usar a IA para extrair o tema
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        model = genai.GenerativeModel("gemini-1.5-pro")
+
+        prompt = (
+            "A partir do seguinte texto, identifique um único tema principal ou título. "
+            "Sua resposta deve ser apenas o tema, sem texto adicional. "
+            "Texto: " + payload.text_content[:2000]  # Limita o texto para o prompt
+        )
+
+        response = model.generate_content(prompt)
+        ai_theme = response.text.strip().replace('"', "")
+
+        logger.info(f"Tema extraído pela IA: '{ai_theme}'")
+
+        # 2. Salvar o material bruto no SQLite
+        raw_material_id = str(uuid.uuid4())
+
+        db_service.save_raw_material(
+            conn=conn,
+            raw_material_id=raw_material_id,
+            url=None,  # Não há URL neste fluxo
+            content=payload.text_content,
+        )
+        logger.info(f"Material bruto salvo no SQLite com ID: {raw_material_id}")
+
+        # 3. Preparar e salvar os dados no PostgreSQL
+        task_id = str(uuid.uuid4())
+
+        postgres_payload = {
+            "user_id": payload.user_id,
+            "automation_request_id": str(uuid.uuid4()),
+            "task_id": task_id,
+            "status": "RAW_COLLECTED",
+            "theme": ai_theme,
+            "content_type": payload.content_type,
+            "raw_material_ids": [raw_material_id],  # Salva a lista de IDs brutos
+        }
+
+        saved_record = pg_service.save_automation_data_to_postgres(postgres_payload)
+
+        if not saved_record:
+            raise HTTPException(
+                status_code=500, detail="Erro ao salvar dados no PostgreSQL."
+            )
+
+        # 4. Retornar a resposta
+        return {
+            "message": "Tema gerado e dados salvos. Use o task_id para iniciar a automação.",
+            "task_id": task_id,
+            "theme": ai_theme,
+            "automation_request_id": saved_record.get("automation_request_id"),
+        }
+
+    except HTTPException:
+        # Propaga o erro HTTP
+        raise
+    except Exception as e:
+        logger.error(f"Erro na automação por texto: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Erro interno no servidor: {str(e)}"
+        )
+
+
+@router.post(
+    "/trigger",
+    tags=["Automação"],
+    summary="Acionar automação síncrona",
+    description="Inicia a automação de geração de conteúdo com base em parâmetros fornecidos, executando de forma síncrona.",
+)
+async def trigger_automation_post(
+    request_data: TriggerRequest,
+    user_payload: dict = Depends(Auth.verify_token),
+):
+    logger.info(
+        f"Endpoint POST /trigger acionado por {user_payload.get('sub', 'Desconhecido')}."
+    )
+    output_format = request_data.output_format
+    theme = request_data.theme
+    user_id = user_payload.get("sub", "anonymous_user")
+    task_id = str(uuid.uuid4())
+
+    try:
+        output_report = await run_automation(
+            output_format=output_format,
+            theme=theme,
+            auth_headers={"Authorization": f"Bearer {user_payload.get('token')}"},
+            user_id=user_id,
+            task_id=task_id,
+            return_raw_material_only=False,
+        )
+
+        if not isinstance(output_report, str):
+            output_report = str(output_report)
+
+        return JSONResponse(
+            content={
+                "message": "Automação executada com sucesso!",
+                "report_summary": output_report,
+                "parameters": {"output_format": output_format, "theme": theme},
+            },
+            media_type="application/json; charset=utf-8",
+        )
+
+    except ValidationError as e:
+        logger.error(f"Erro de validação Pydantic: {str(e)}")
+        if Config.LOGS_API_URL:
+            log_data = {
+                "action": f"Falha de validação Pydantic para POST /trigger. Erro: {str(e)}",
+                "timestamp": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", ""),
+                "level": "ERROR",
+                "report_id": task_id,
+            }
+            send_logs_to_backend(log_data)
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Erro de validação.", "errors": e.errors()},
+        )
+    except HTTPException as http_exc:
+        logger.error(f"Erro HTTP: {http_exc.detail}")
+        if Config.LOGS_API_URL:
+            log_data = {
+                "action": f"Falha na automação POST /trigger. Erro: {http_exc.detail}",
+                "timestamp": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", ""),
+                "level": "ERROR",
+                "report_id": task_id,
+            }
+            send_logs_to_backend(log_data)
+        raise
+    except Exception as e:
+        logger.error(f"Erro inesperado: {str(e)}")
+        if Config.LOGS_API_URL:
+            log_data = {
+                "action": f"Erro inesperado na automação POST /trigger. Erro: {str(e)}",
+                "timestamp": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", ""),
+                "level": "CRITICAL",
+                "report_id": task_id,
+            }
+            send_logs_to_backend(log_data)
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+
+
+@router.get(
+    "/trigger-by-id/{id}",
+    response_model=TriggerResponse,
+    tags=["Automação"],
+    summary="Acionar automação por ID",
+    description="Inicia a coleta de material bruto em segundo plano com base em um ID de requisição existente.",
+)
+async def trigger_by_id(
+    id: int,
+    background_tasks: BackgroundTasks,
+    user_payload: dict = Depends(Auth.verify_token),
+    db: Session = Depends(get_db),
+):
+    logger.info(
+        f"Endpoint /trigger-by-id/{id} acionado por {user_payload.get('sub', 'Desconhecido')}."
+    )
+    user_id = user_payload.get("sub", "anonymous_user")
+    task_id = str(uuid.uuid4())
+
+    try:
+        request_entry = (
+            db.query(AutomationRequest).filter(AutomationRequest.id == id).first()
+        )
+        if not request_entry:
+            logger.warning(f"Registro com ID {id} não encontrado.")
+            if Config.LOGS_API_URL:
+                log_data = {
+                    "action": f"Falha ao executar automação para ID {id}: Registro não encontrado.",
+                    "timestamp": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", ""),
+                    "level": "WARNING",
+                    "report_id": task_id,
+                }
+                send_logs_to_backend(log_data)
+            raise HTTPException(
+                status_code=404, detail=f"Registro com ID {id} não encontrado"
+            )
+
+        output_format = request_entry.output_format
+        theme = request_entry.theme
+        logger.info(
+            f"Parâmetros do DB: output_format='{output_format}', theme='{theme}'"
+        )
+
+        db_service.save_material(
+            user_id=user_id,
+            task_id=task_id,
+            theme=theme,
+            raw_material="",
+            source_urls=[],
+            content_type=output_format,
+            status="PENDING_COLLECTION",
+        )
+        logger.info(f"Tarefa '{task_id}' salva para coleta.")
+
+        background_tasks.add_task(
+            run_automation,
+            output_format=output_format,
+            theme=theme,
+            auth_headers={"Authorization": f"Bearer {user_payload.get('token')}"},
+            user_id=user_id,
+            task_id=task_id,
+            return_raw_material_only=True,
+        )
+
+        return TriggerResponse(
+            trigger_id=id,
+            message="Coleta de material iniciada em segundo plano.",
+            task_id=task_id,
+            status="PENDING_COLLECTION",
+        )
+
+    except HTTPException as http_exc:
+        logger.error(f"Erro HTTP para ID {id}: {http_exc.detail}")
+        if Config.LOGS_API_URL:
+            log_data = {
+                "action": f"Falha na automação para ID {id}. Erro: {http_exc.detail}",
+                "timestamp": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", ""),
+                "level": "ERROR",
+                "report_id": task_id,
+            }
+            send_logs_to_backend(log_data)
+        raise
+    except Exception as e:
+        logger.error(f"Erro inesperado para ID {id}: {str(e)}")
+        if Config.LOGS_API_URL:
+            log_data = {
+                "action": f"Erro inesperado na automação para ID {id}. Erro: {str(e)}",
+                "timestamp": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", ""),
+                "level": "CRITICAL",
+                "report_id": task_id,
+            }
+            send_logs_to_backend(log_data)
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
