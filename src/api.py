@@ -33,6 +33,7 @@ from src.models import AutomationRequest
 from src.utils import send_logs_to_backend
 from sqlalchemy.orm import Session
 import src.postgresql_service as pg_service
+from src.automation_service import run_automation
 
 logger = logging.getLogger(__name__)
 
@@ -703,14 +704,11 @@ async def generate_content_api(
         raise HTTPException(status_code=500, detail="Erro interno no servidor.")
 
 
-@router.post(
-    "/extract-from-urls",
-    response_model=TriggerResponse,
-    tags=["Automação"],
-    summary="Extrair conteúdo de múltiplas URLs",
-    description="Extrai conteúdo de uma lista de URLs, salva em raw_materials e inicia geração em segundo plano.",
-)
-# Adicione este código em src/api.py
+# src/api.py
+# ... suas importações, incluindo
+# from src.database_service import get_db_connection
+
+
 @router.post(
     "/trigger-multiple-urls",
     response_model=TriggerResponse,
@@ -722,6 +720,7 @@ async def trigger_multiple_urls(
     request: ExtractFromUrlsRequest,
     background_tasks: BackgroundTasks,
     user: dict = Depends(Auth.verify_token),
+    conn: sqlite3.Connection = Depends(get_db_connection),
 ):
     task_id = str(uuid.uuid4())
     user_id = request.user_id
@@ -729,7 +728,9 @@ async def trigger_multiple_urls(
     content_type = request.output_format or Config.OUTPUT_FORMAT
 
     try:
+        # Passa a conexão 'conn' para save_material
         db_service.save_material(
+            conn=conn,
             user_id=user_id,
             automation_request_id=None,
             task_id=task_id,
@@ -744,17 +745,38 @@ async def trigger_multiple_urls(
             if content:
                 cleaned_content = clean_html_content(content)
                 if cleaned_content:
-                    raw_id = db_service.save_raw_material(task_id, cleaned_content)
+                    # Passa a conexão 'conn' para save_raw_material
+                    raw_id = db_service.save_raw_material(
+                        conn=conn,
+                        user_id=user_id,
+                        task_id=task_id,
+                        url=url,
+                        content=cleaned_content,
+                    )
                     raw_material_ids.append(raw_id)
 
         if not raw_material_ids:
-            db_service.update_material_status(user_id, task_id, "COLLECTION_FAILED")
+            # Passa a conexão 'conn' para update_material_status
+            db_service.update_material_status(
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status="COLLECTION_FAILED",
+            )
             raise HTTPException(
                 status_code=400, detail="Nenhum conteúdo extraído das URLs fornecidas"
             )
 
-        db_service.update_material_raw_material_ids(user_id, task_id, raw_material_ids)
-        db_service.update_material_status(user_id, task_id, "RAW_COLLECTED")
+        # Passa a conexão 'conn' para update_material_raw_material_ids
+        db_service.update_material_raw_material_ids(
+            conn=conn,
+            task_id=task_id,
+            raw_material_ids=raw_material_ids,
+        )
+        # Passa a conexão 'conn' para update_material_status
+        db_service.update_material_status(
+            conn=conn, user_id=user_id, task_id=task_id, new_status="RAW_COLLECTED"
+        )
 
         background_tasks.add_task(
             process_material_task,
@@ -772,7 +794,10 @@ async def trigger_multiple_urls(
 
     except Exception as e:
         logger.error(f"Erro na extração de URLs para task_id {task_id}: {str(e)}")
-        db_service.update_material_status(user_id, task_id, "COLLECTION_FAILED")
+        # Passa a conexão 'conn' para update_material_status no bloco de exceção
+        db_service.update_material_status(
+            conn=conn, user_id=user_id, task_id=task_id, new_status="COLLECTION_FAILED"
+        )
         raise HTTPException(status_code=500, detail=f"Erro na extração: {str(e)}")
 
 
