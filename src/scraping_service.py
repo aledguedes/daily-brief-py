@@ -11,19 +11,29 @@ import src.database_service as db_service
 logger = logging.getLogger(__name__)
 
 
+# src/scraping_service.py
+
+# ... (suas importações)
+
+
 async def fetch_url_content(url: str) -> str:
     """
-    Busca o conteúdo HTML de uma URL fornecida.
-
-    Args:
-        url (str): URL a ser acessada.
-
-    Returns:
-        str: Conteúdo HTML bruto ou string vazia em caso de erro.
+    Busca o conteúdo HTML de uma URL fornecida, com headers de navegador para evitar bloqueios.
     """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.8,en-US;q=0.5,en;q=0.3",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=Config.REQUEST_TIMEOUT) as response:
+            async with session.get(
+                url, headers=headers, timeout=Config.REQUEST_TIMEOUT
+            ) as response:
                 response.raise_for_status()
                 return await response.text()
     except Exception as e:
@@ -33,7 +43,7 @@ async def fetch_url_content(url: str) -> str:
 
 def clean_html_content(html_content: str) -> str:
     """
-    Limpa o conteúdo HTML, removendo scripts, estilos e extraindo texto limpo.
+    Limpa o conteúdo HTML, removendo elementos de 'ruído' e focando no texto principal.
 
     Args:
         html_content (str): Conteúdo HTML bruto.
@@ -43,11 +53,49 @@ def clean_html_content(html_content: str) -> str:
     """
     try:
         soup = BeautifulSoup(html_content, "html.parser")
-        for script in soup(["script", "style"]):
-            script.decompose()
-        text = soup.get_text(separator="\n")
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return "\n\n".join(lines)[: Config.MAX_TEXT_LEN]
+
+        logger.info("Iniciando a limpeza do HTML...")
+
+        # Remove elementos que geralmente não contêm o conteúdo principal
+        for tag in soup(["script", "style", "nav", "footer", "aside"]):
+            tag.decompose()
+
+        logger.info("Elementos de 'ruído' removidos.")
+
+        # Pega o texto de tags de conteúdo principal, incluindo 'span'
+        main_text = []
+        for tag in soup.find_all(
+            ["p", "h1", "h2", "h3", "article", "blockquote", "span"]
+        ):
+            # Adicionei 'span' para capturar o conteúdo do site de teste
+            text = tag.get_text(strip=True)
+            if text and len(text.split()) > 5:  # Filtra frases muito curtas
+                main_text.append(text)
+
+        logger.info(f"Conteúdo extraído: {main_text}")
+
+        # Se não encontrar tags de conteúdo principal, pega o texto do body
+        if not main_text:
+            logger.warning(
+                "Nenhuma tag de conteúdo principal encontrada. Tentando extrair do <body>."
+            )
+            body = soup.find("body")
+            if body:
+                text = body.get_text(separator="\n", strip=True)
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                cleaned_text = "\n\n".join(lines)[: Config.MAX_TEXT_LEN]
+                logger.info(
+                    f"Texto do <body> extraído. Início do conteúdo: {cleaned_text[:100]}..."
+                )
+                return cleaned_text
+
+            logger.error("Nenhum conteúdo encontrado no <body>.")
+            return ""
+
+        cleaned_text = "\n\n".join(main_text)[: Config.MAX_TEXT_LEN]
+        logger.info(f"Conteúdo final pronto. Início: {cleaned_text[:100]}...")
+        return cleaned_text
+
     except Exception as e:
         logger.error(f"Erro ao limpar HTML: {e}")
         return ""

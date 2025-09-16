@@ -276,6 +276,27 @@ def get_material(conn: sqlite3.Connection, user_id: str, task_id: str):
     except Exception as e:
         logger.error(f"Erro ao buscar material para task_id {task_id}: {str(e)}")
         return None
+        
+def get_material_by_task_id(conn: sqlite3.Connection, task_id: str):
+    """
+    Busca os dados de um material apenas pelo task_id, sem verificar o user_id.
+    Útil para operações de background onde o user_id pode não estar disponível.
+    """
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM materials WHERE task_id = ?
+            """,
+            (task_id,),
+        )
+        material_data = cursor.fetchone()
+        if material_data:
+            return dict(material_data)
+        return None
+    except Exception as e:
+        logger.error(f"Erro ao buscar material pelo task_id {task_id}: {str(e)}")
+        return None
 
 
 def get_raw_material(conn: sqlite3.Connection, raw_material_id: str):

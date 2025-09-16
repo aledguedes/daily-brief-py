@@ -35,6 +35,9 @@ from sqlalchemy.orm import Session
 import src.postgresql_service as pg_service
 from src.automation_service import run_automation
 
+# Configuração de logging
+logging.basicConfig(level=logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -275,12 +278,41 @@ async def generate_content_with_gemini_service(
             f"Inclua um prompt sugerido para geração de imagem."
         )
         response = await model.generate_content_async(prompt)
-        generated_data = json.loads(response.text)
-        logger.info(f"Conteúdo gerado para o tema '{theme}' com tipo '{content_type}'.")
-        return generated_data
+        
+        # Verificar se a resposta é válida
+        if not response or not response.text:
+            logger.error("Resposta vazia ou inválida do Gemini")
+            return {
+                "title": f"Erro na geração para '{theme}'",
+                "content_pt": "Não foi possível gerar conteúdo. Tente novamente mais tarde.",
+                "content_en": "Content generation failed. Please try again later.",
+                "content_es": "No se pudo generar contenido. Inténtelo de nuevo más tarde.",
+                "suggested_image_prompt": f"Error image for {theme}"
+            }
+            
+        try:
+            generated_data = json.loads(response.text)
+            logger.info(f"Conteúdo gerado para o tema '{theme}' com tipo '{content_type}'.")
+            return generated_data
+        except json.JSONDecodeError as json_err:
+            logger.error(f"Erro ao decodificar JSON da resposta: {str(json_err)}")
+            return {
+                "title": f"Erro de formato para '{theme}'",
+                "content_pt": "Erro no formato da resposta. Tente novamente.",
+                "content_en": "Response format error. Please try again.",
+                "content_es": "Error en el formato de respuesta. Inténtelo de nuevo.",
+                "suggested_image_prompt": f"Error formatting for {theme}"
+            }
     except Exception as e:
         logger.error(f"Erro ao gerar conteúdo com Gemini: {str(e)}")
-        raise
+        # Retornar um objeto válido em vez de lançar exceção
+        return {
+            "title": f"Falha na geração para '{theme}'",
+            "content_pt": "Ocorreu um erro durante a geração de conteúdo.",
+            "content_en": "An error occurred during content generation.",
+            "content_es": "Se produjo un error durante la generación de contenido.",
+            "suggested_image_prompt": f"Error generating content for {theme}"
+        }
 
 
 @router.get(
@@ -479,22 +511,35 @@ async def process_material_task(
     user: dict,
     automation_request_id: Optional[str],
     task_id: str,
+    raw_material_ids: List[str],
 ):
     """
     Processa o material bruto e gera o conteúdo final.
     """
-    user_id = user.get("sub")
+    # Verificar se user é None ou não é um dicionário
+    if user is None or not isinstance(user, dict):
+        logger.error(f"User inválido para task_id {task_id}")
+        return
+        
+    user_id = user.get("sub") if isinstance(user, dict) else None
     if not user_id:
-        logger.error("User ID not found in token")
+        logger.error(f"User ID não encontrado no token para task_id {task_id}")
         return
 
     try:
-        # Usar o gerenciador de contexto para a conexão
+        # Verificar se task_id é válido
+        if not task_id:
+            logger.error("Task ID inválido")
+            return
+            
+        # Verificar se raw_material_ids é válido
+        if raw_material_ids is None:
+            raw_material_ids = []
+            logger.warning(f"Lista de raw_material_ids é None para task_id {task_id}")
+
         async with AsyncDatabaseManager(DB_FILE) as conn:
-            material = db_service.get_material(
-                conn=conn, user_id=user_id, task_id=task_id
-            )
-            if not material or not material.get("raw_material_ids"):
+            # A lista de IDs já é passada. A lógica de verificação agora é mais simples e direta.
+            if not raw_material_ids:
                 logger.error(f"Nenhum material bruto encontrado para task_id {task_id}")
                 db_service.update_material_status(
                     conn=conn,
@@ -504,18 +549,42 @@ async def process_material_task(
                 )
                 return
 
-            raw_materials = []
-            # CORREÇÃO: Transforma a string de IDs em uma lista
-            raw_id_list = material["raw_material_ids"].replace(" ", "").split(",")
-
-            for raw_id in raw_id_list:
-                # Garante que o ID não está vazio
-                if raw_id:
-                    content = db_service.get_raw_material(
-                        conn=conn, raw_material_id=raw_id
+            # Obter material com tratamento de erro
+            try:
+                material = db_service.get_material(
+                    conn=conn, user_id=user_id, task_id=task_id
+                )
+                if not material:
+                    logger.error(f"Material não encontrado para task_id {task_id}")
+                    db_service.update_material_status(
+                        conn=conn,
+                        user_id=user_id,
+                        task_id=task_id,
+                        new_status="FAILED_NO_MATERIAL",
                     )
-                    if content and content.get("content"):
-                        raw_materials.append(content.get("content"))
+                    return
+            except Exception as mat_err:
+                logger.error(f"Erro ao obter material para task_id {task_id}: {str(mat_err)}")
+                db_service.update_material_status(
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    new_status="FAILED_NO_MATERIAL",
+                )
+                return
+
+            raw_materials = []
+
+            for raw_id in raw_material_ids:
+                if raw_id:
+                    try:
+                        content = db_service.get_raw_material(
+                            conn=conn, raw_material_id=raw_id
+                        )
+                        if content and isinstance(content, dict) and content.get("content"):
+                            raw_materials.append(content.get("content"))
+                    except Exception as raw_err:
+                        logger.error(f"Erro ao obter raw material {raw_id}: {str(raw_err)}")
 
             if not raw_materials:
                 logger.error(f"Nenhum conteúdo válido para task_id {task_id}")
@@ -529,46 +598,100 @@ async def process_material_task(
 
             compiled_raw_material = "\n\n".join(raw_materials)
 
-            # Limita o tamanho do material bruto para evitar excesso de tokens
             max_text_len = 10000
             if len(compiled_raw_material) > max_text_len:
                 compiled_raw_material = compiled_raw_material[:max_text_len]
 
-            theme = material.get("theme", "Desconhecido")
-            content_type = material.get("content_type", "article")
+            # Usar valores padrão caso material seja None ou não tenha os campos esperados
+            theme = "Desconhecido"
+            content_type = "article"
+            
+            if material and isinstance(material, dict):
+                theme = material.get("theme", "Desconhecido")
+                content_type = material.get("content_type", "article")
 
-            db_service.update_material_status(
-                conn=conn,
-                user_id=user_id,
-                task_id=task_id,
-                new_status="PENDING_GENERATION",
-            )
+            # Atualizar status para PENDING_GENERATION
+            try:
+                db_service.update_material_status(
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    new_status="PENDING_GENERATION",
+                )
+            except Exception as status_err:
+                logger.error(f"Erro ao atualizar status para PENDING_GENERATION: {str(status_err)}")
 
         # Gerar conteúdo fora do contexto do banco de dados para evitar bloqueio durante operações longas
-        generated_data = await generate_content_with_gemini_service(
-            theme=theme,
-            raw_material=compiled_raw_material,
-            content_type=content_type,
-        )
-
-        # Abrir nova conexão para salvar o resultado
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-            db_service.save_material(
-                conn=conn,
-                user_id=user_id,
-                automation_request_id=automation_request_id,
-                task_id=task_id,
-                status="GENERATED",
+        generated_data = None
+        try:
+            generated_data = await generate_content_with_gemini_service(
                 theme=theme,
+                raw_material=compiled_raw_material,
                 content_type=content_type,
-                raw_material_ids=material["raw_material_ids"],
-                generated_content=json.dumps(generated_data, ensure_ascii=False),
-                suggested_image_prompt=generated_data.get("suggested_image_prompt"),
             )
+        except Exception as gen_err:
+            logger.error(f"Erro ao gerar conteúdo com Gemini: {str(gen_err)}")
+            
+        # Verificar se generated_data não é None ou não é um dicionário
+        if generated_data is None or not isinstance(generated_data, dict):
+            logger.warning(f"Dados gerados inválidos para task_id {task_id}, usando conteúdo padrão")
+            generated_data = {
+                "title": f"Conteúdo para {theme}",
+                "content_pt": "Não foi possível gerar conteúdo automaticamente.",
+                "content_en": "Content could not be generated automatically.",
+                "content_es": "No se pudo generar contenido automáticamente.",
+                "suggested_image_prompt": f"Image for {theme}"
+            }
+            
+        # Garantir que temos um valor para suggested_image_prompt
+        suggested_image_prompt = None
+        if isinstance(generated_data, dict):
+            suggested_image_prompt = generated_data.get("suggested_image_prompt")
+            
+        # Se suggested_image_prompt for None, definir um valor padrão
+        if suggested_image_prompt is None:
+            suggested_image_prompt = f"Image for {theme}"
+            
+        try:
+            async with AsyncDatabaseManager(DB_FILE) as conn:
+                db_service.save_material(
+                    conn=conn,
+                    user_id=user_id,
+                    automation_request_id=automation_request_id,
+                    task_id=task_id,
+                    status="GENERATED",
+                    theme=theme,
+                    content_type=content_type,
+                    raw_material_ids=",".join(raw_material_ids) if raw_material_ids else "",
+                    generated_content=json.dumps(generated_data, ensure_ascii=False),
+                    suggested_image_prompt=suggested_image_prompt,
+                )
+                logger.info(f"Material processado com sucesso para task_id {task_id}")
+        except Exception as save_err:
+            logger.error(f"Erro ao salvar material processado: {str(save_err)}")
+            try:
+                async with AsyncDatabaseManager(DB_FILE) as conn:
+                    db_service.update_material_status(
+                        conn=conn,
+                        user_id=user_id,
+                        task_id=task_id,
+                        new_status="FAILED_GENERATION"
+                    )
+            except Exception as update_err:
+                logger.error(f"Erro ao atualizar status para FAILED_GENERATION: {str(update_err)}")
 
     except Exception as e:
         logger.error(f"Erro ao processar material para task_id {task_id}: {str(e)}")
-        db_service.update_material_status(user_id, task_id, "FAILED_GENERATION")
+        try:
+            async with AsyncDatabaseManager(DB_FILE) as conn:
+                db_service.update_material_status(
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    new_status="FAILED_PROCESSING"
+                )
+        except Exception as final_err:
+            logger.error(f"Erro final ao atualizar status: {str(final_err)}")
 
 
 # Rota para salvar o material bruto, sem disparar a automação
@@ -704,11 +827,6 @@ async def generate_content_api(
         raise HTTPException(status_code=500, detail="Erro interno no servidor.")
 
 
-# src/api.py
-# ... suas importações, incluindo
-# from src.database_service import get_db_connection
-
-
 @router.post(
     "/trigger-multiple-urls",
     response_model=TriggerResponse,
@@ -728,7 +846,6 @@ async def trigger_multiple_urls(
     content_type = request.output_format or Config.OUTPUT_FORMAT
 
     try:
-        # Passa a conexão 'conn' para save_material
         db_service.save_material(
             conn=conn,
             user_id=user_id,
@@ -741,22 +858,26 @@ async def trigger_multiple_urls(
 
         raw_material_ids = []
         for url in request.urls:
+            logger.info(f"Tentando extrair conteúdo da URL: {url}")
             content = await fetch_url_content(url)
-            if content:
-                cleaned_content = clean_html_content(content)
-                if cleaned_content:
-                    # Passa a conexão 'conn' para save_raw_material
-                    raw_id = db_service.save_raw_material(
-                        conn=conn,
-                        user_id=user_id,
-                        task_id=task_id,
-                        url=url,
-                        content=cleaned_content,
-                    )
-                    raw_material_ids.append(raw_id)
+            await asyncio.sleep(10)
+
+            if not content:
+                logger.warning(f"Nenhum conteúdo retornado para a URL: {url}")
+                continue
+
+            cleaned_content = clean_html_content(content)
+            if cleaned_content:
+                raw_id = db_service.save_raw_material(
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    url=url,
+                    content=cleaned_content,
+                )
+                raw_material_ids.append(raw_id)
 
         if not raw_material_ids:
-            # Passa a conexão 'conn' para update_material_status
             db_service.update_material_status(
                 conn=conn,
                 user_id=user_id,
@@ -767,13 +888,11 @@ async def trigger_multiple_urls(
                 status_code=400, detail="Nenhum conteúdo extraído das URLs fornecidas"
             )
 
-        # Passa a conexão 'conn' para update_material_raw_material_ids
         db_service.update_material_raw_material_ids(
             conn=conn,
             task_id=task_id,
             raw_material_ids=raw_material_ids,
         )
-        # Passa a conexão 'conn' para update_material_status
         db_service.update_material_status(
             conn=conn, user_id=user_id, task_id=task_id, new_status="RAW_COLLECTED"
         )
@@ -783,6 +902,7 @@ async def trigger_multiple_urls(
             user=user,
             automation_request_id=None,
             task_id=task_id,
+            raw_material_ids=raw_material_ids,
         )
 
         return TriggerResponse(
@@ -794,7 +914,6 @@ async def trigger_multiple_urls(
 
     except Exception as e:
         logger.error(f"Erro na extração de URLs para task_id {task_id}: {str(e)}")
-        # Passa a conexão 'conn' para update_material_status no bloco de exceção
         db_service.update_material_status(
             conn=conn, user_id=user_id, task_id=task_id, new_status="COLLECTION_FAILED"
         )
