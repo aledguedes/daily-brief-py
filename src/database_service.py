@@ -402,6 +402,34 @@ def save_selector(
         raise
 
 
+def update_material_raw_material_ids(
+    conn: sqlite3.Connection, task_id: str, raw_material_ids: List[str]
+):
+    """
+    Atualiza a tabela materials com os IDs dos materiais brutos.
+    """
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE materials
+            SET raw_material_ids = ?, updated_at = ?
+            WHERE task_id = ?
+            """,
+            (
+                json.dumps(raw_material_ids),
+                datetime.now(timezone.utc).isoformat().replace("+00:00", ""),
+                task_id,
+            ),
+        )
+        logger.info(f"raw_material_ids atualizados para a tarefa: {task_id}")
+    except Exception as e:
+        logger.error(
+            f"Erro ao atualizar raw_material_ids para a tarefa {task_id}: {str(e)}"
+        )
+        raise
+
+
 def get_selectors(conn: sqlite3.Connection, user_id: str) -> List[Dict]:
     """
     Busca todos os seletores associados a um user_id. Recebe a conexão como parâmetro.
