@@ -35,9 +35,6 @@ from sqlalchemy.orm import Session
 import src.postgresql_service as pg_service
 from src.automation_service import run_automation
 
-# Configuração de logging
-logging.basicConfig(level=logging.INFO)
-
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -513,44 +510,25 @@ async def process_material_task(
     task_id: str,
     raw_material_ids: List[str],
 ):
-    """
-    Processa o material bruto e gera o conteúdo final.
-    """
-    # Verificar se user é None ou não é um dicionário
-    if user is None or not isinstance(user, dict):
-        logger.error(f"User inválido para task_id {task_id}")
-        return
-        
+    # Restante da função...
     user_id = user.get("sub") if isinstance(user, dict) else None
     if not user_id:
         logger.error(f"User ID não encontrado no token para task_id {task_id}")
         return
 
     try:
-        # Verificar se task_id é válido
         if not task_id:
             logger.error("Task ID inválido")
             return
             
-        # Verificar se raw_material_ids é válido
         if raw_material_ids is None:
             raw_material_ids = []
             logger.warning(f"Lista de raw_material_ids é None para task_id {task_id}")
 
+        # **Cria uma nova conexão aqui**
         async with AsyncDatabaseManager(DB_FILE) as conn:
-            # A lista de IDs já é passada. A lógica de verificação agora é mais simples e direta.
-            if not raw_material_ids:
-                logger.error(f"Nenhum material bruto encontrado para task_id {task_id}")
-                db_service.update_material_status(
-                    conn=conn,
-                    user_id=user_id,
-                    task_id=task_id,
-                    new_status="FAILED_NO_MATERIAL",
-                )
-                return
-
-            # Obter material com tratamento de erro
             try:
+                # Usa a nova conexão para buscar o material
                 material = db_service.get_material(
                     conn=conn, user_id=user_id, task_id=task_id
                 )
@@ -602,7 +580,6 @@ async def process_material_task(
             if len(compiled_raw_material) > max_text_len:
                 compiled_raw_material = compiled_raw_material[:max_text_len]
 
-            # Usar valores padrão caso material seja None ou não tenha os campos esperados
             theme = "Desconhecido"
             content_type = "article"
             
@@ -610,7 +587,6 @@ async def process_material_task(
                 theme = material.get("theme", "Desconhecido")
                 content_type = material.get("content_type", "article")
 
-            # Atualizar status para PENDING_GENERATION
             try:
                 db_service.update_material_status(
                     conn=conn,
@@ -621,7 +597,7 @@ async def process_material_task(
             except Exception as status_err:
                 logger.error(f"Erro ao atualizar status para PENDING_GENERATION: {str(status_err)}")
 
-        # Gerar conteúdo fora do contexto do banco de dados para evitar bloqueio durante operações longas
+        # A lógica de geração de conteúdo deve ser executada fora do bloco 'with' para evitar bloqueio
         generated_data = None
         try:
             generated_data = await generate_content_with_gemini_service(
@@ -632,7 +608,6 @@ async def process_material_task(
         except Exception as gen_err:
             logger.error(f"Erro ao gerar conteúdo com Gemini: {str(gen_err)}")
             
-        # Verificar se generated_data não é None ou não é um dicionário
         if generated_data is None or not isinstance(generated_data, dict):
             logger.warning(f"Dados gerados inválidos para task_id {task_id}, usando conteúdo padrão")
             generated_data = {
@@ -643,16 +618,10 @@ async def process_material_task(
                 "suggested_image_prompt": f"Image for {theme}"
             }
             
-        # Garantir que temos um valor para suggested_image_prompt
-        suggested_image_prompt = None
-        if isinstance(generated_data, dict):
-            suggested_image_prompt = generated_data.get("suggested_image_prompt")
-            
-        # Se suggested_image_prompt for None, definir um valor padrão
-        if suggested_image_prompt is None:
-            suggested_image_prompt = f"Image for {theme}"
+        suggested_image_prompt = generated_data.get("suggested_image_prompt", f"Image for {theme}")
             
         try:
+            # **Cria uma nova conexão para a gravação final**
             async with AsyncDatabaseManager(DB_FILE) as conn:
                 db_service.save_material(
                     conn=conn,
@@ -838,85 +807,93 @@ async def trigger_multiple_urls(
     request: ExtractFromUrlsRequest,
     background_tasks: BackgroundTasks,
     user: dict = Depends(Auth.verify_token),
-    conn: sqlite3.Connection = Depends(get_db_connection),
 ):
     task_id = str(uuid.uuid4())
-    user_id = request.user_id
+    user_id = user.get("sub")
     theme = request.theme or "Desconhecido"
     content_type = request.output_format or Config.OUTPUT_FORMAT
 
     try:
-        db_service.save_material(
-            conn=conn,
-            user_id=user_id,
-            automation_request_id=None,
-            task_id=task_id,
-            status="PENDING_COLLECTION",
-            theme=theme,
-            content_type=content_type,
-        )
+        # Usa uma única transação para todas as operações
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            db_service.save_material(
+                conn=conn,
+                user_id=user_id,
+                automation_request_id=None,
+                task_id=task_id,
+                status="PENDING_COLLECTION",
+                theme=theme,
+                content_type=content_type,
+            )
 
-        raw_material_ids = []
-        for url in request.urls:
-            logger.info(f"Tentando extrair conteúdo da URL: {url}")
-            content = await fetch_url_content(url)
-            await asyncio.sleep(10)
+            raw_material_ids = []
+            for url in request.urls:
+                logger.info(f"Tentando extrair conteúdo da URL: {url}")
+                content = await fetch_url_content(url)
+                if not content:
+                    logger.warning(f"Nenhum conteúdo retornado para a URL: {url}")
+                    continue
 
-            if not content:
-                logger.warning(f"Nenhum conteúdo retornado para a URL: {url}")
-                continue
+                cleaned_content = clean_html_content(content)
+                if cleaned_content:
+                    raw_id = db_service.save_raw_material(
+                        conn=conn,
+                        user_id=user_id,
+                        task_id=task_id,
+                        url=url,
+                        content=cleaned_content,
+                    )
+                    raw_material_ids.append(raw_id)
 
-            cleaned_content = clean_html_content(content)
-            if cleaned_content:
-                raw_id = db_service.save_raw_material(
+            if not raw_material_ids:
+                db_service.update_material_status(
                     conn=conn,
                     user_id=user_id,
                     task_id=task_id,
-                    url=url,
-                    content=cleaned_content,
+                    new_status="COLLECTION_FAILED",
                 )
-                raw_material_ids.append(raw_id)
+                raise HTTPException(
+                    status_code=400, detail="Nenhum conteúdo extraído das URLs fornecidas"
+                )
 
-        if not raw_material_ids:
-            db_service.update_material_status(
+            db_service.update_material_raw_material_ids(
                 conn=conn,
-                user_id=user_id,
                 task_id=task_id,
-                new_status="COLLECTION_FAILED",
+                raw_material_ids=raw_material_ids,
             )
-            raise HTTPException(
-                status_code=400, detail="Nenhum conteúdo extraído das URLs fornecidas"
+            db_service.update_material_status(
+                conn=conn, user_id=user_id, task_id=task_id, new_status="RAW_COLLECTED"
             )
+            
+        # Adicione um pequeno atraso para garantir o commit
+        await asyncio.sleep(1)
 
-        db_service.update_material_raw_material_ids(
-            conn=conn,
-            task_id=task_id,
-            raw_material_ids=raw_material_ids,
-        )
-        db_service.update_material_status(
-            conn=conn, user_id=user_id, task_id=task_id, new_status="RAW_COLLECTED"
-        )
-
-        background_tasks.add_task(
-            process_material_task,
-            user=user,
-            automation_request_id=None,
-            task_id=task_id,
-            raw_material_ids=raw_material_ids,
-        )
+        # Dispara a tarefa de segundo plano passando apenas os IDs
+        # background_tasks.add_task(
+        #     process_material_task,
+        #     user=user,
+        #     automation_request_id=None,
+        #     task_id=task_id,
+        #     raw_material_ids=raw_material_ids,
+        # )
 
         return TriggerResponse(
             trigger_id=None,
-            message="Extração de URLs concluída. Geração iniciada em segundo plano.",
+            message="Extração de URLs concluída. Geração de conteúdo será iniciada separadamente.",
             task_id=task_id,
-            status="PENDING_GENERATION",
+            status="RAW_COLLECTED"
         )
 
+    except HTTPException:
+        # Propaga o erro HTTP sem alterar
+        raise
     except Exception as e:
         logger.error(f"Erro na extração de URLs para task_id {task_id}: {str(e)}")
-        db_service.update_material_status(
-            conn=conn, user_id=user_id, task_id=task_id, new_status="COLLECTION_FAILED"
-        )
+        # A nova conexão para atualização de status já está no bloco principal
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            db_service.update_material_status(
+                conn=conn, user_id=user_id, task_id=task_id, new_status="COLLECTION_FAILED"
+            )
         raise HTTPException(status_code=500, detail=f"Erro na extração: {str(e)}")
 
 
