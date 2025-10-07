@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-DB_FILE = "dailyBrief.db"
+import os
+
+DB_FILE = os.getenv("DB_FILE", os.path.join(os.getcwd(), "dailyBrief.db"))
 
 
 class AsyncDatabaseManager:
@@ -276,7 +278,8 @@ def get_material(conn: sqlite3.Connection, user_id: str, task_id: str):
     except Exception as e:
         logger.error(f"Erro ao buscar material para task_id {task_id}: {str(e)}")
         return None
-        
+
+
 def get_material_by_task_id(conn: sqlite3.Connection, task_id: str):
     """
     Busca os dados de um material apenas pelo task_id, sem verificar o user_id.
