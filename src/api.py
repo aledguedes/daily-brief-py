@@ -1326,3 +1326,11 @@ async def trigger_by_id(
             }
             send_logs_to_backend(log_data)
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+
+
+@router.get("/test-ok")
+def test_ok():
+    """
+    Rota pública para teste de funcionamento.
+    """
+    return {"status": "ok", "message": "Rota pública funcionando perfeitamente!"}
