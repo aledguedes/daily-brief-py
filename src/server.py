@@ -49,12 +49,12 @@ app = FastAPI(
             "description": "Endpoints para iniciar e gerenciar processos de automação de conteúdo.",
         },
         {
-            "name": "Materiais",
-            "description": "Endpoints para gerenciar materiais brutos e conteúdos gerados.",
+            "name": "trigger-automation",
+            "description": "Endpoints para acionar automação de conteúdo.",
         },
         {
-            "name": "Seletores",
-            "description": "Endpoints para gerenciar seletores usados no scraping de conteúdo.",
+            "name": "generate-content",
+            "description": "Endpoints para gerar conteúdo com base em materiais brutos.",
         },
         {
             "name": "Teste",

@@ -128,8 +128,11 @@ class MaterialResponse(BaseModel):
 
 
 class TriggerRequest(BaseModel):
-    output_format: str = Config.OUTPUT_FORMAT
-    theme: Optional[str] = None
+    theme: Optional[str] = Field(None, alias="theme")
+    output_format: Optional[str] = Field(None, alias="outputFormat")
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class TriggerResponse(BaseModel):
@@ -142,15 +145,21 @@ class TriggerResponse(BaseModel):
 class ExtractFromUrlsRequest(BaseModel):
     urls: List[str]
     theme: Optional[str] = None
-    output_format: Optional[str] = None
-    user_id: str
+    output_format: Optional[str] = Field(None, alias="outputFormat")
+    user_id: str = Field(..., alias="userId")
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class GenerateContentRequest(BaseModel):
-    task_id: str
-    user_id: str
-    theme: Optional[str] = None
-    output_format: Optional[str] = None
+    user_id: str = Field(..., alias="userId")
+    task_id: str = Field(..., alias="taskId")
+    theme: Optional[str] = Field(None, alias="theme")
+    output_format: Optional[str] = Field(None, alias="outputFormat")
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class UrlRequest(BaseModel):
@@ -275,7 +284,7 @@ async def generate_content_with_gemini_service(
             f"Inclua um prompt sugerido para geração de imagem."
         )
         response = await model.generate_content_async(prompt)
-        
+
         # Verificar se a resposta é válida
         if not response or not response.text:
             logger.error("Resposta vazia ou inválida do Gemini")
@@ -284,12 +293,14 @@ async def generate_content_with_gemini_service(
                 "content_pt": "Não foi possível gerar conteúdo. Tente novamente mais tarde.",
                 "content_en": "Content generation failed. Please try again later.",
                 "content_es": "No se pudo generar contenido. Inténtelo de nuevo más tarde.",
-                "suggested_image_prompt": f"Error image for {theme}"
+                "suggested_image_prompt": f"Error image for {theme}",
             }
-            
+
         try:
             generated_data = json.loads(response.text)
-            logger.info(f"Conteúdo gerado para o tema '{theme}' com tipo '{content_type}'.")
+            logger.info(
+                f"Conteúdo gerado para o tema '{theme}' com tipo '{content_type}'."
+            )
             return generated_data
         except json.JSONDecodeError as json_err:
             logger.error(f"Erro ao decodificar JSON da resposta: {str(json_err)}")
@@ -298,7 +309,7 @@ async def generate_content_with_gemini_service(
                 "content_pt": "Erro no formato da resposta. Tente novamente.",
                 "content_en": "Response format error. Please try again.",
                 "content_es": "Error en el formato de respuesta. Inténtelo de nuevo.",
-                "suggested_image_prompt": f"Error formatting for {theme}"
+                "suggested_image_prompt": f"Error formatting for {theme}",
             }
     except Exception as e:
         logger.error(f"Erro ao gerar conteúdo com Gemini: {str(e)}")
@@ -308,7 +319,7 @@ async def generate_content_with_gemini_service(
             "content_pt": "Ocorreu um erro durante a geração de conteúdo.",
             "content_en": "An error occurred during content generation.",
             "content_es": "Se produjo un error durante la generación de contenido.",
-            "suggested_image_prompt": f"Error generating content for {theme}"
+            "suggested_image_prompt": f"Error generating content for {theme}",
         }
 
 
@@ -324,7 +335,7 @@ async def test_endpoint():
 
 @router.post(
     "/generate-content-manual",
-    tags=["Automação"],
+    tags=["generate-content"],
     summary="Gerar conteúdo manualmente",
     description="Gera conteúdo com base em material bruto fornecido manualmente.",
 )
@@ -368,7 +379,7 @@ async def generate_content_manual(
 
 @router.post(
     "/submit-final-post",
-    tags=["Automação"],
+    tags=["generate-content"],
     summary="Submeter post final",
     description="Envia o post final para o backend e opcionalmente deleta a task associada.",
 )
@@ -400,7 +411,7 @@ async def submit_final_post(
 
 
 @router.get(
-    "/get_task_result",
+    "/get-task-result",
     response_model=MaterialResponse,
     tags=["Automação"],
     summary="Obter resultado de uma task",
@@ -439,7 +450,7 @@ async def get_task_result(
 
 
 @router.get(
-    "/list_user_materials",
+    "/list-user-materials",
     response_model=List[MaterialResponse],
     tags=["Automação"],
     summary="Listar materiais do usuário",
@@ -520,7 +531,7 @@ async def process_material_task(
         if not task_id:
             logger.error("Task ID inválido")
             return
-            
+
         if raw_material_ids is None:
             raw_material_ids = []
             logger.warning(f"Lista de raw_material_ids é None para task_id {task_id}")
@@ -542,7 +553,9 @@ async def process_material_task(
                     )
                     return
             except Exception as mat_err:
-                logger.error(f"Erro ao obter material para task_id {task_id}: {str(mat_err)}")
+                logger.error(
+                    f"Erro ao obter material para task_id {task_id}: {str(mat_err)}"
+                )
                 db_service.update_material_status(
                     conn=conn,
                     user_id=user_id,
@@ -559,10 +572,16 @@ async def process_material_task(
                         content = db_service.get_raw_material(
                             conn=conn, raw_material_id=raw_id
                         )
-                        if content and isinstance(content, dict) and content.get("content"):
+                        if (
+                            content
+                            and isinstance(content, dict)
+                            and content.get("content")
+                        ):
                             raw_materials.append(content.get("content"))
                     except Exception as raw_err:
-                        logger.error(f"Erro ao obter raw material {raw_id}: {str(raw_err)}")
+                        logger.error(
+                            f"Erro ao obter raw material {raw_id}: {str(raw_err)}"
+                        )
 
             if not raw_materials:
                 logger.error(f"Nenhum conteúdo válido para task_id {task_id}")
@@ -582,7 +601,7 @@ async def process_material_task(
 
             theme = "Desconhecido"
             content_type = "article"
-            
+
             if material and isinstance(material, dict):
                 theme = material.get("theme", "Desconhecido")
                 content_type = material.get("content_type", "article")
@@ -595,7 +614,9 @@ async def process_material_task(
                     new_status="PENDING_GENERATION",
                 )
             except Exception as status_err:
-                logger.error(f"Erro ao atualizar status para PENDING_GENERATION: {str(status_err)}")
+                logger.error(
+                    f"Erro ao atualizar status para PENDING_GENERATION: {str(status_err)}"
+                )
 
         # A lógica de geração de conteúdo deve ser executada fora do bloco 'with' para evitar bloqueio
         generated_data = None
@@ -607,19 +628,23 @@ async def process_material_task(
             )
         except Exception as gen_err:
             logger.error(f"Erro ao gerar conteúdo com Gemini: {str(gen_err)}")
-            
+
         if generated_data is None or not isinstance(generated_data, dict):
-            logger.warning(f"Dados gerados inválidos para task_id {task_id}, usando conteúdo padrão")
+            logger.warning(
+                f"Dados gerados inválidos para task_id {task_id}, usando conteúdo padrão"
+            )
             generated_data = {
                 "title": f"Conteúdo para {theme}",
                 "content_pt": "Não foi possível gerar conteúdo automaticamente.",
                 "content_en": "Content could not be generated automatically.",
                 "content_es": "No se pudo generar contenido automáticamente.",
-                "suggested_image_prompt": f"Image for {theme}"
+                "suggested_image_prompt": f"Image for {theme}",
             }
-            
-        suggested_image_prompt = generated_data.get("suggested_image_prompt", f"Image for {theme}")
-            
+
+        suggested_image_prompt = generated_data.get(
+            "suggested_image_prompt", f"Image for {theme}"
+        )
+
         try:
             # **Cria uma nova conexão para a gravação final**
             async with AsyncDatabaseManager(DB_FILE) as conn:
@@ -631,7 +656,9 @@ async def process_material_task(
                     status="GENERATED",
                     theme=theme,
                     content_type=content_type,
-                    raw_material_ids=",".join(raw_material_ids) if raw_material_ids else "",
+                    raw_material_ids=(
+                        ",".join(raw_material_ids) if raw_material_ids else ""
+                    ),
                     generated_content=json.dumps(generated_data, ensure_ascii=False),
                     suggested_image_prompt=suggested_image_prompt,
                 )
@@ -644,10 +671,12 @@ async def process_material_task(
                         conn=conn,
                         user_id=user_id,
                         task_id=task_id,
-                        new_status="FAILED_GENERATION"
+                        new_status="FAILED_GENERATION",
                     )
             except Exception as update_err:
-                logger.error(f"Erro ao atualizar status para FAILED_GENERATION: {str(update_err)}")
+                logger.error(
+                    f"Erro ao atualizar status para FAILED_GENERATION: {str(update_err)}"
+                )
 
     except Exception as e:
         logger.error(f"Erro ao processar material para task_id {task_id}: {str(e)}")
@@ -657,7 +686,7 @@ async def process_material_task(
                     conn=conn,
                     user_id=user_id,
                     task_id=task_id,
-                    new_status="FAILED_PROCESSING"
+                    new_status="FAILED_PROCESSING",
                 )
         except Exception as final_err:
             logger.error(f"Erro final ao atualizar status: {str(final_err)}")
@@ -667,7 +696,7 @@ async def process_material_task(
 @router.post(
     "/trigger-by-url",
     response_model=TriggerResponse,
-    tags=["Automação"],
+    tags=["trigger-automation"],
     summary="Acionar automação por URL",
     description="Extrai conteúdo de uma URL específica e salva o material bruto sem iniciar a geração.",
 )
@@ -751,7 +780,7 @@ async def trigger_by_url(
 # Rota para disparar a geração de conteúdo
 @router.post(
     "/generate/{task_id}",
-    tags=["Automação"],
+    tags=["generate-content"],
     summary="Gerar conteúdo sob demanda",
     description="Inicia a tarefa de geração de conteúdo para um task_id existente.",
 )
@@ -799,7 +828,7 @@ async def generate_content_api(
 @router.post(
     "/trigger-multiple-urls",
     response_model=TriggerResponse,
-    tags=["Automação"],
+    tags=["trigger-automation"],
     summary="Extrair conteúdo de múltiplas URLs",
     description="Extrai conteúdo de uma lista de URLs, salva em raw_materials e inicia a geração em segundo plano.",
 )
@@ -853,7 +882,8 @@ async def trigger_multiple_urls(
                     new_status="COLLECTION_FAILED",
                 )
                 raise HTTPException(
-                    status_code=400, detail="Nenhum conteúdo extraído das URLs fornecidas"
+                    status_code=400,
+                    detail="Nenhum conteúdo extraído das URLs fornecidas",
                 )
 
             db_service.update_material_raw_material_ids(
@@ -864,7 +894,7 @@ async def trigger_multiple_urls(
             db_service.update_material_status(
                 conn=conn, user_id=user_id, task_id=task_id, new_status="RAW_COLLECTED"
             )
-            
+
         # Adicione um pequeno atraso para garantir o commit
         await asyncio.sleep(1)
 
@@ -881,7 +911,7 @@ async def trigger_multiple_urls(
             trigger_id=None,
             message="Extração de URLs concluída. Geração de conteúdo será iniciada separadamente.",
             task_id=task_id,
-            status="RAW_COLLECTED"
+            status="RAW_COLLECTED",
         )
 
     except HTTPException:
@@ -892,14 +922,17 @@ async def trigger_multiple_urls(
         # A nova conexão para atualização de status já está no bloco principal
         async with AsyncDatabaseManager(DB_FILE) as conn:
             db_service.update_material_status(
-                conn=conn, user_id=user_id, task_id=task_id, new_status="COLLECTION_FAILED"
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status="COLLECTION_FAILED",
             )
         raise HTTPException(status_code=500, detail=f"Erro na extração: {str(e)}")
 
 
 @router.post(
     "/generate-content",
-    tags=["Automação"],
+    tags=["generate-content"],
     summary="Gerar conteúdo sob demanda",
     description="Gera conteúdo com base em um task_id existente, usando materiais brutos salvos no banco.",
 )
@@ -997,6 +1030,7 @@ async def get_raw_material(
 
 @router.get(
     "/raw-materials-by-task/{task_id}",
+    tags=["Automação"],
     summary="Busca todos os materiais brutos de uma tarefa",
     description="Retorna o conteúdo de todas as URLs de uma única requisição de automação.",
     response_model=RawMaterialsListResponse,
@@ -1019,15 +1053,18 @@ async def get_raw_materials_by_task(
 
 # Modelo Pydantic para o corpo da requisição
 class ContentInput(BaseModel):
-    user_id: str
-    text_content: str
-    content_type: str = "artigo"
-    theme: str = "tema_padrao"  # Opcional, será sobrescrito pela IA
+    user_id: str = Field(..., alias="userId")
+    text_content: str = Field(..., alias="textContent")
+    content_type: str = Field("artigo", alias="contentType")
+    theme: str = Field("tema_padrao", alias="theme")
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 @router.post(
     "/trigger-by-text",
-    tags=["Automação"],
+    tags=["trigger-automation"],
     summary="Inicia automação a partir de um texto",
     description="Recebe um texto, extrai um tema com a IA, salva no banco e prepara a automação.",
     status_code=200,
@@ -1108,7 +1145,7 @@ async def trigger_by_text(
 
 @router.post(
     "/trigger",
-    tags=["Automação"],
+    tags=["trigger-automation"],
     summary="Acionar automação síncrona",
     description="Inicia a automação de geração de conteúdo com base em parâmetros fornecidos, executando de forma síncrona.",
 )
@@ -1193,7 +1230,7 @@ async def trigger_automation_post(
 @router.get(
     "/trigger-by-id/{id}",
     response_model=TriggerResponse,
-    tags=["Automação"],
+    tags=["trigger-automation"],
     summary="Acionar automação por ID",
     description="Inicia a coleta de material bruto em segundo plano com base em um ID de requisição existente.",
 )
