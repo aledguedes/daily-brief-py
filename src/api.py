@@ -120,7 +120,7 @@ class MaterialResponse(BaseModel):
     status: str
     theme: Optional[str] = None
     content_type: Optional[str] = None
-    raw_material: Optional[Union[str, Dict[str, Any]]] = None
+    raw_material_ids: Optional[List[str]] = None
     generated_content: Optional[Union[str, Dict[str, Any]]] = None
     suggested_image_prompt: Optional[str] = None
     created_at: str
@@ -171,6 +171,14 @@ class UrlRequest(BaseModel):
         "summary",
         description="O tipo de conteúdo a ser gerado (ex: 'summary', 'article', 'social_media_post').",
     )
+
+
+class RawMaterialRequest(BaseModel):
+    ids: List[str]
+
+
+class UpdateRawMaterialRequest(BaseModel):
+    content: str
 
 
 # Esquemas para Gemini
@@ -460,9 +468,7 @@ async def list_user_materials(
     user: dict = Depends(Auth.verify_token),
 ):
     try:
-        # Usa AsyncDatabaseManager para gerenciar a conexão
         async with AsyncDatabaseManager(DB_FILE) as conn:
-            # Acessa o user_id diretamente da chave 'sub'
             materials = db_service.list_user_materials(conn, user.get("sub"))
             if not materials:
                 return []
@@ -475,7 +481,11 @@ async def list_user_materials(
                     status=material.get("status"),
                     theme=material.get("theme"),
                     content_type=material.get("content_type"),
-                    raw_material=material.get("raw_material"),
+                    raw_material_ids=(
+                        json.loads(material.get("raw_material_ids", "[]"))
+                        if material.get("raw_material_ids")
+                        else []
+                    ),
                     generated_content=material.get("generated_content"),
                     suggested_image_prompt=material.get("suggested_image_prompt"),
                     created_at=material.get("created_at"),
@@ -1328,9 +1338,266 @@ async def trigger_by_id(
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 
-@router.get("/test-ok")
-def test_ok():
+@router.get(
+    "/posts",
+    tags=["Posts"],
+    summary="Listar todos os posts/tarefas",
+    description="Retorna uma lista paginada de todos os posts (tarefas) gerados, com informações de status e visualização.",
+)
+def list_posts():
     """
-    Rota pública para teste de funcionamento.
+    Retorna todos os posts (tarefas) gerados, simulando a estrutura de data/articles.json.
     """
-    return {"status": "ok", "message": "Rota pública funcionando perfeitamente!"}
+    try:
+        conn = sqlite3.connect(db_service.DB_FILE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM materials ORDER BY created_at DESC")
+        materials = cursor.fetchall()
+        conn.close()
+
+        posts = []
+        for row in materials:
+            status = row["status"]
+            status_label = (
+                "Finalizado"
+                if status == "COMPLETED"
+                else (
+                    "Em andamento"
+                    if status in ("PENDING", "RAW_COLLECTED")
+                    else "Falhou"
+                )
+            )
+            status_color = (
+                "green"
+                if status == "COMPLETED"
+                else "yellow" if status in ("PENDING", "RAW_COLLECTED") else "red"
+            )
+            gradient = (
+                "from-indigo-500 to-purple-500"
+                if status == "COMPLETED"
+                else (
+                    "from-yellow-400 to-orange-400"
+                    if status in ("PENDING", "RAW_COLLECTED")
+                    else "from-red-400 to-pink-500"
+                )
+            )
+
+            posts.append(
+                {
+                    "id": row["task_id"],
+                    "title": row["theme"] or "Tema indefinido",
+                    "subtitle": row["content_type"] or "Sem tipo definido",
+                    "description": (
+                        row["generated_content"] or "Material ainda não gerado."
+                    )[:250],
+                    "date": row["created_at"][:10] if row["created_at"] else "",
+                    "status": status,
+                    "statusLabel": status_label,
+                    "statusColor": status_color,
+                    "tags": [row["content_type"] or "geral"],
+                    "gradient": gradient,
+                    "panelDetails": None,
+                }
+            )
+        return {"data": posts, "count": len(posts)}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao listar posts: {str(e)}")
+
+
+@router.get(
+    "/posts/{task_id}",
+    tags=["Posts"],
+    summary="Obter detalhes de um post/tarefa por ID",
+    description="Retorna os detalhes completos de um post/tarefa específica (para o side panel do admin), incluindo material bruto e conteúdo gerado.",
+)
+def get_post_by_id(task_id: str):
+    """
+    Retorna os detalhes completos de um post/tarefa (para o side panel do admin).
+    """
+    try:
+        conn = sqlite3.connect(db_service.DB_FILE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM materials WHERE task_id = ?", (task_id,))
+        material = cursor.fetchone()
+
+        if not material:
+            raise HTTPException(status_code=404, detail="Post não encontrado")
+
+        cursor.execute("SELECT * FROM raw_materials WHERE task_id = ?", (task_id,))
+        raw_materials = cursor.fetchall()
+        conn.close()
+
+        raw_texts = [r["content"] for r in raw_materials]
+        raw_material_combined = (
+            "\n\n".join(raw_texts) if raw_texts else "(sem material bruto)"
+        )
+
+        status = material["status"]
+        status_label = (
+            "Finalizado"
+            if status == "COMPLETED"
+            else (
+                "Em andamento" if status in ("PENDING", "RAW_COLLECTED") else "Falhou"
+            )
+        )
+        status_color = (
+            "green"
+            if status == "COMPLETED"
+            else "yellow" if status in ("PENDING", "RAW_COLLECTED") else "red"
+        )
+
+        post = {
+            "id": material["task_id"],
+            "title": material["theme"],
+            "subtitle": f"Tipo: {material['content_type'] or 'Desconhecido'}",
+            "statusLabel": status_label,
+            "statusColor": status_color,
+            "tags": [material["content_type"] or "Geral"],
+            "date": material["created_at"][:10] if material["created_at"] else "",
+            "description": (material["generated_content"] or "Aguardando geração...")[
+                :300
+            ],
+            "panelDetails": {
+                "raw_material": raw_material_combined,
+                "generated_content_preview": {
+                    "summary": (material["generated_content"] or "sem conteúdo gerado")[
+                        :500
+                    ],
+                    "topics": ["Introdução", "Análise", "Conclusão"],
+                },
+                "image_prompt": material["suggested_image_prompt"]
+                or "sem prompt definido",
+                "logs": [
+                    f"Status atual: {status_label}",
+                    f"Atualizado em: {material['updated_at']}",
+                    f"Task ID: {task_id}",
+                ],
+            },
+        }
+
+        return post
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Erro ao buscar post {task_id}: {str(e)}"
+        )
+
+
+@router.post(
+    "/list-raw-materials-by-ids",
+    tags=["Automação"],
+    summary="Listar materiais brutos por IDs (conteúdo resumido)",
+    description="Recebe uma lista de IDs e retorna os registros correspondentes da tabela raw_materials, limitando o campo content para melhor performance.",
+)
+async def list_raw_materials_by_ids(request: RawMaterialRequest):
+    """
+    Exemplo de requisição:
+    {
+      "ids": ["56598d6c-1b61-4a4d-9bf5-a2ed74f0ca6e", "253be6c8-8762-41b4-a218-5682434d42f5"]
+    }
+    """
+    try:
+        if not request.ids:
+            raise HTTPException(status_code=400, detail="Lista de IDs vazia.")
+
+        conn = sqlite3.connect(db_service.DB_FILE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        placeholders = ",".join("?" * len(request.ids))
+        query = f"SELECT * FROM raw_materials WHERE id IN ({placeholders})"
+        cursor.execute(query, request.ids)
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            return []
+
+        MAX_CONTENT_LENGTH = 1000  # 👈 limite de caracteres exibidos
+        result = []
+        for row in rows:
+            content = row["content"] or ""
+            preview = (
+                content[:MAX_CONTENT_LENGTH].rstrip() + "..."
+                if len(content) > MAX_CONTENT_LENGTH
+                else content
+            )
+
+            result.append(
+                {
+                    "id": row["id"],
+                    "user_id": row["user_id"],
+                    "task_id": row["task_id"],
+                    "url": row["url"],
+                    "content": preview,
+                    "created_at": row["created_at"],
+                }
+            )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Erro ao buscar materiais por IDs: {str(e)}"
+        )
+
+
+@router.put(
+    "/update-raw-material-content/{id}",
+    tags=["Automação"],
+    summary="Atualizar conteúdo de um material bruto",
+    description="Atualiza o campo 'content' da tabela raw_materials com base no ID fornecido.",
+)
+async def update_raw_material_content(id: str, request: UpdateRawMaterialRequest):
+    """
+    Exemplo de requisição:
+    PUT /api/update-raw-material-content/{id}
+    {
+      "content": "Novo texto atualizado do material bruto."
+    }
+    """
+    try:
+        conn = sqlite3.connect(db_service.DB_FILE)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id FROM raw_materials WHERE id = ?", (id,))
+        existing = cursor.fetchone()
+        if not existing:
+            conn.close()
+            raise HTTPException(
+                status_code=404, detail=f"Material com ID {id} não encontrado."
+            )
+
+        cursor.execute(
+            """
+            UPDATE raw_materials
+            SET content = ?, created_at = ?
+            WHERE id = ?
+            """,
+            (
+                request.content,
+                datetime.now().isoformat(),
+                id,
+            ),
+        )
+
+        conn.commit()
+        conn.close()
+
+        return {"message": "Conteúdo atualizado com sucesso.", "id": id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Erro ao atualizar conteúdo: {str(e)}"
+        )
