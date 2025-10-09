@@ -83,6 +83,25 @@ def init_db():
                 """
             )
 
+            cursor.execute("PRAGMA table_info(raw_materials)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if "updated_at" not in columns:
+                cursor.execute("ALTER TABLE raw_materials ADD COLUMN updated_at TEXT")
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS raw_materials_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    raw_material_id TEXT NOT NULL,
+                    old_content TEXT,
+                    updated_at TEXT NOT NULL,
+                    user_id TEXT,
+                    task_id TEXT,
+                    FOREIGN KEY (raw_material_id) REFERENCES raw_materials(id)
+                )
+                """
+            )
+
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS selectors (

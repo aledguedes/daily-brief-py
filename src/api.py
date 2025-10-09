@@ -179,6 +179,7 @@ class RawMaterialRequest(BaseModel):
 
 class UpdateRawMaterialRequest(BaseModel):
     content: str
+    user_id: str
 
 
 # Esquemas para Gemini
@@ -1554,33 +1555,56 @@ async def list_raw_materials_by_ids(request: RawMaterialRequest):
 @router.put(
     "/update-raw-material-content/{id}",
     tags=["Automação"],
-    summary="Atualizar conteúdo de um material bruto",
-    description="Atualiza o campo 'content' da tabela raw_materials com base no ID fornecido.",
+    summary="Atualizar conteúdo de um material bruto (com histórico)",
+    description="Atualiza o campo 'content' da tabela raw_materials, registrando a versão anterior em raw_materials_history.",
 )
 async def update_raw_material_content(id: str, request: UpdateRawMaterialRequest):
     """
     Exemplo de requisição:
     PUT /api/update-raw-material-content/{id}
     {
-      "content": "Novo texto atualizado do material bruto."
+      "content": "Novo texto atualizado do material bruto.",
+      "user_id": "admin@dailybrief.com"
     }
     """
     try:
         conn = sqlite3.connect(db_service.DB_FILE)
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        cursor.execute("SELECT id FROM raw_materials WHERE id = ?", (id,))
-        existing = cursor.fetchone()
-        if not existing:
+        # Verifica se o material existe
+        cursor.execute("SELECT * FROM raw_materials WHERE id = ?", (id,))
+        material = cursor.fetchone()
+        if not material:
             conn.close()
             raise HTTPException(
                 status_code=404, detail=f"Material com ID {id} não encontrado."
             )
 
+        old_content = material["content"]
+        user_id = request.user_id or material["user_id"]
+        task_id = material["task_id"]
+
+        # Salva o conteúdo anterior no histórico
+        cursor.execute(
+            """
+            INSERT INTO raw_materials_history (raw_material_id, old_content, updated_at, user_id, task_id)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                id,
+                old_content,
+                datetime.now().isoformat(),
+                user_id,
+                task_id,
+            ),
+        )
+
+        # Atualiza o conteúdo principal e o campo updated_at
         cursor.execute(
             """
             UPDATE raw_materials
-            SET content = ?, created_at = ?
+            SET content = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -1593,7 +1617,11 @@ async def update_raw_material_content(id: str, request: UpdateRawMaterialRequest
         conn.commit()
         conn.close()
 
-        return {"message": "Conteúdo atualizado com sucesso.", "id": id}
+        return {
+            "message": "Conteúdo atualizado com sucesso.",
+            "id": id,
+            "history_saved": True,
+        }
 
     except HTTPException:
         raise
