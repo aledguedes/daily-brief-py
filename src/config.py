@@ -39,6 +39,11 @@ class Config:
     SERPER_API_KEY = os.getenv("SERPER_API_KEY")
     UNSPLASH_API_KEY = os.getenv("UNSPLASH_API_KEY")
 
+    # Configuração DeepSeek (NOVO)
+    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+    DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v2")
+    DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+
     # Configurações do Gemini
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
     MAX_TEXT_LEN = int(os.getenv("MAX_TEXT_LEN", 30000))

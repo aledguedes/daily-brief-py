@@ -13,7 +13,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl, Field, ValidationError
 from typing import List, Optional, Dict, Any, Union
 
-import google.generativeai as genai
+from sqlalchemy.orm import Session
+
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 from dotenv import load_dotenv
 import os
@@ -31,9 +32,10 @@ from src.scraping_service import (
 from src.database import get_db
 from src.models import AutomationRequest
 from src.utils import send_logs_to_backend
-from sqlalchemy.orm import Session
-import src.postgresql_service as pg_service
 from src.automation_service import run_automation
+from src.providers import get_provider_instance
+from src.content import build_generation_prompt, build_image_prompt
+from src.schemas import RESPONSE_SCHEMA_V1
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +50,33 @@ class RawMaterialsListResponse(BaseModel):
     raw_materials: List[Dict[str, Any]]
 
 
-# Configuração da API Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError(
-        "A chave GEMINI_API_KEY não foi encontrada. Verifique seu arquivo .env"
-    )
-genai.configure(api_key=GEMINI_API_KEY)
+class StatusResponse(BaseModel):
+    id: int
+    name: str
+    display_name: str
+    bg_class: str
+    text_class: str
+
+
+class MaterialResponse(BaseModel):
+    user_id: str
+    automation_request_id: Optional[Union[int, str]] = None
+    task_id: str
+    status: StatusResponse
+    theme: Optional[str] = None
+    content_type: Optional[str] = None
+    raw_material_ids: Optional[List[str]] = None
+    generated_content: Optional[Union[str, Dict[str, Any]]] = None
+    suggested_image_prompt: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class TriggerResponse(BaseModel):
+    trigger_id: Optional[str] = None
+    message: str
+    task_id: str
+    status: StatusResponse
 
 
 # Modelos Pydantic
@@ -90,6 +112,9 @@ class GenerateContentManualRequest(BaseModel):
     article_structure: Optional[List[str]] = None
     audience: Optional[str] = None
     ideal_article_example: Optional[str] = None
+    provider: str = Field(
+        "gemini", description="O provedor de IA a ser usado (ex: 'gemini', 'deepseek')."
+    )
 
 
 class SubmitFinalPostRequest(BaseModel):
@@ -99,6 +124,9 @@ class SubmitFinalPostRequest(BaseModel):
 
 class ImageGenerationRequest(BaseModel):
     prompt: str
+    provider: str = Field(
+        "gemini", description="O provedor de IA a ser usado para gerar a imagem."
+    )
 
 
 class ImageGenerationResponse(BaseModel):
@@ -113,50 +141,12 @@ class AutomationRequestDetails(BaseModel):
     updatedAt: datetime
 
 
-class MaterialResponse(BaseModel):
-    user_id: str
-    automation_request_id: Optional[Union[int, str]] = None
-    task_id: str
-    status: str
-    theme: Optional[str] = None
-    content_type: Optional[str] = None
-    raw_material_ids: Optional[List[str]] = None
-    generated_content: Optional[Union[str, Dict[str, Any]]] = None
-    suggested_image_prompt: Optional[str] = None
-    created_at: str
-    updated_at: str
-
-
 class TriggerRequest(BaseModel):
     theme: Optional[str] = Field(None, alias="theme")
     output_format: Optional[str] = Field(None, alias="outputFormat")
-
-    class Config:
-        allow_population_by_field_name = True
-
-
-class TriggerResponse(BaseModel):
-    trigger_id: Optional[str] = None
-    message: str
-    task_id: str
-    status: str
-
-
-class ExtractFromUrlsRequest(BaseModel):
-    urls: List[str]
-    theme: Optional[str] = None
-    output_format: Optional[str] = Field(None, alias="outputFormat")
-    user_id: str = Field(..., alias="userId")
-
-    class Config:
-        allow_population_by_field_name = True
-
-
-class GenerateContentRequest(BaseModel):
-    user_id: str = Field(..., alias="userId")
-    task_id: str = Field(..., alias="taskId")
-    theme: Optional[str] = Field(None, alias="theme")
-    output_format: Optional[str] = Field(None, alias="outputFormat")
+    provider: str = Field(
+        "gemini", description="O provedor de IA a ser usado (ex: 'gemini', 'deepseek')."
+    )
 
     class Config:
         allow_population_by_field_name = True
@@ -164,13 +154,31 @@ class GenerateContentRequest(BaseModel):
 
 class UrlRequest(BaseModel):
     url: HttpUrl = Field(..., description="A URL da qual o conteúdo será extraído.")
-    theme: str = Field(
-        ..., min_length=3, description="O tema a ser usado para a geração do conteúdo."
+
+
+class ExtractFromUrlsRequest(BaseModel):
+    urls: List[HttpUrl] = Field(
+        ..., description="Lista de URLs para extrair o conteúdo."
     )
-    content_type: str = Field(
-        "summary",
-        description="O tipo de conteúdo a ser gerado (ex: 'summary', 'article', 'social_media_post').",
+
+    class Config:
+        allow_population_by_field_name = True
+
+
+class GenerateContentRequest(BaseModel):
+    task_id: str = Field(
+        ..., alias="taskId", description="ID da task com materiais brutos salvos."
     )
+    theme: str = Field(..., description="O tema principal do conteúdo.")
+    output_format: str = Field(
+        ..., alias="outputFormat", description="O tipo de conteúdo a ser gerado."
+    )
+    provider: str = Field(
+        "gemini", description="O provedor de IA a ser usado (ex: 'gemini', 'deepseek')."
+    )
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class RawMaterialRequest(BaseModel):
@@ -180,60 +188,6 @@ class RawMaterialRequest(BaseModel):
 class UpdateRawMaterialRequest(BaseModel):
     content: str
     user_id: str
-
-
-# Esquemas para Gemini
-GEMINI_OUTPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "title": {
-            "type": "object",
-            "properties": {
-                "PT": {"type": "string"},
-                "EN": {"type": "string"},
-                "ES": {"type": "string"},
-            },
-        },
-        "excerpt": {
-            "type": "object",
-            "properties": {
-                "PT": {"type": "string"},
-                "EN": {"type": "string"},
-                "ES": {"type": "string"},
-            },
-        },
-        "content": {
-            "type": "object",
-            "properties": {
-                "PT": {"type": "string"},
-                "EN": {"type": "string"},
-                "ES": {"type": "string"},
-            },
-        },
-        "metaDescription": {
-            "type": "object",
-            "properties": {
-                "PT": {"type": "string"},
-                "EN": {"type": "string"},
-                "ES": {"type": "string"},
-            },
-        },
-        "tags": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Tags relevantes para o artigo",
-        },
-        "category": {
-            "type": "string",
-            "description": "Categoria principal do artigo",
-        },
-        "suggested_image_prompt": {
-            "type": "string",
-            "description": "Prompt sugerido para geração de imagem",
-        },
-    },
-    "required": ["title", "excerpt", "content", "metaDescription", "tags", "category"],
-}
 
 
 @retry(
@@ -280,55 +234,115 @@ async def send_post(post_data: dict, headers: dict):
         raise
 
 
-async def generate_content_with_gemini_service(
-    theme: str, raw_material: str, content_type: str
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(2),
+    retry=retry_if_exception_type((Exception)),
+)
+async def generate_content_with_provider_service(
+    provider_name: str, theme: str, raw_material: str, content_type: str
 ) -> dict:
-    """Gera conteúdo usando a API Gemini com base no material bruto."""
+    """Gera conteúdo (texto) e um prompt de imagem usando o provedor de IA dinâmico."""
+    logger.info(f"Iniciando geração de conteúdo com provedor: {provider_name}")
+
+    IMAGE_PROMPT_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "image_prompt": {
+                "type": "string",
+                "description": "O prompt de imagem em inglês, pronto para um gerador de imagens.",
+            }
+        },
+        "required": ["image_prompt"],
+    }
+
     try:
-        model = genai.GenerativeModel("gemini-1.5-pro")
-        prompt = (
-            f"Baseado no tema '{theme}', gere um {content_type} em português, inglês e espanhol. "
-            f"Use o seguinte material bruto como referência: {raw_material[:Config.MAX_TEXT_LEN]}. "
-            f"Retorne o resultado no formato JSON conforme o esquema: {json.dumps(GEMINI_OUTPUT_SCHEMA)}. "
-            f"Inclua um prompt sugerido para geração de imagem."
+        content_provider = get_provider_instance(provider_name)
+        content_prompt = build_generation_prompt(
+            theme=theme, raw_material=raw_material, content_type=content_type
         )
-        response = await model.generate_content_async(prompt)
+        generated_content_data = await content_provider.generate_content(
+            prompt=content_prompt, response_schema=RESPONSE_SCHEMA_V1
+        )
 
-        # Verificar se a resposta é válida
-        if not response or not response.text:
-            logger.error("Resposta vazia ou inválida do Gemini")
-            return {
-                "title": f"Erro na geração para '{theme}'",
-                "content_pt": "Não foi possível gerar conteúdo. Tente novamente mais tarde.",
-                "content_en": "Content generation failed. Please try again later.",
-                "content_es": "No se pudo generar contenido. Inténtelo de nuevo más tarde.",
-                "suggested_image_prompt": f"Error image for {theme}",
-            }
+        image_provider_name = Config.IMAGE_PROMPT_PROVIDER or provider_name
+        image_provider = get_provider_instance(image_provider_name)
+        image_prompt_request = build_image_prompt(
+            generated_content=generated_content_data, content_type=content_type
+        )
+        image_prompt_result_json = await image_provider.generate_content(
+            prompt=image_prompt_request, response_schema=IMAGE_PROMPT_SCHEMA
+        )
 
-        try:
-            generated_data = json.loads(response.text)
-            logger.info(
-                f"Conteúdo gerado para o tema '{theme}' com tipo '{content_type}'."
-            )
-            return generated_data
-        except json.JSONDecodeError as json_err:
-            logger.error(f"Erro ao decodificar JSON da resposta: {str(json_err)}")
-            return {
-                "title": f"Erro de formato para '{theme}'",
-                "content_pt": "Erro no formato da resposta. Tente novamente.",
-                "content_en": "Response format error. Please try again.",
-                "content_es": "Error en el formato de respuesta. Inténtelo de nuevo.",
-                "suggested_image_prompt": f"Error formatting for {theme}",
-            }
+        suggested_image_prompt = image_prompt_result_json.get(
+            "image_prompt", f"A beautiful image for the theme {theme}."
+        )
+
+        fallback_title = {
+            "PT": f"Erro na geração para '{theme}'",
+            "EN": f"Error in generation for '{theme}'",
+            "ES": f"Error en la generación para '{theme}'",
+        }
+        fallback_content = {
+            "PT": f"<p>Ocorreu um erro durante a geração de conteúdo com o provedor {provider_name}.</p>",
+            "EN": f"<p>An error occurred during content generation with provider {provider_name}.</p>",
+            "ES": f"<p>Se produjo un error durante la geração de conteúdo com o provedor {provider_name}.</p>",
+        }
+
+        final_result = {
+            "title": generated_content_data.get("title") or fallback_title,
+            "excerpt": generated_content_data.get("excerpt")
+            or {
+                "PT": "Não foi possível gerar resumo.",
+                "EN": "Could not generate excerpt.",
+                "ES": "No se pudo generar el extracto.",
+            },
+            "content": generated_content_data.get("content") or fallback_content,
+            "metaDescription": generated_content_data.get("metaDescription")
+            or {
+                "PT": f"Falha na geração para {theme}.",
+                "EN": f"Generation failed for {theme}.",
+                "ES": f"Fallo en la geração para {theme}.",
+            },
+            "tags": generated_content_data.get("tags") or [],
+            "category": generated_content_data.get("category") or "General",
+            "suggested_image_prompt": suggested_image_prompt,
+        }
+
+        logger.info(
+            f"Conteúdo e prompt de imagem gerados com sucesso para o tema '{theme}' com provedor '{provider_name}'."
+        )
+        return final_result
+
     except Exception as e:
-        logger.error(f"Erro ao gerar conteúdo com Gemini: {str(e)}")
-        # Retornar um objeto válido em vez de lançar exceção
+        logger.error(
+            f"Erro CRÍTICO ao gerar conteúdo com provedor {provider_name}: {str(e)}",
+            exc_info=True,
+        )
         return {
-            "title": f"Falha na geração para '{theme}'",
-            "content_pt": "Ocorreu um erro durante a geração de conteúdo.",
-            "content_en": "An error occurred during content generation.",
-            "content_es": "Se produjo un error durante la generación de contenido.",
-            "suggested_image_prompt": f"Error generating content for {theme}",
+            "title": {
+                "PT": f"Erro na geração para '{theme}'",
+                "EN": f"Error in generation for '{theme}'",
+                "ES": f"Error en la generación para '{theme}'",
+            },
+            "excerpt": {
+                "PT": "Não foi possível gerar resumo.",
+                "EN": "Could not generate excerpt.",
+                "ES": "No se pudo gerar el extracto.",
+            },
+            "content": {
+                "PT": f"<p>Ocorreu um erro durante a geração de conteúdo com o provedor {provider_name}.</p>",
+                "EN": f"<p>An error occurred during content generation with provider {provider_name}.</p>",
+                "ES": f"<p>Se produjo un error durante la geração de conteúdo com o provedor {provider_name}.</p>",
+            },
+            "metaDescription": {
+                "PT": f"Falha na geração para {theme}.",
+                "EN": f"Generation failed for {theme}.",
+                "ES": f"Fallo en la geração para {theme}.",
+            },
+            "tags": [],
+            "category": "Error",
+            "suggested_image_prompt": f"Error generating content for {theme} using {provider_name}",
         }
 
 
@@ -346,43 +360,70 @@ async def test_endpoint():
     "/generate-content-manual",
     tags=["generate-content"],
     summary="Gerar conteúdo manualmente",
-    description="Gera conteúdo com base em material bruto fornecido manualmente.",
+    description="Gera conteúdo com base em material bruto fornecido manualmente, usando o provedor de IA especificado.",
 )
 async def generate_content_manual(
     request: GenerateContentManualRequest,
     user: dict = Depends(Auth.verify_token),
 ):
-    user_id = request.user_id
+    user_id = user.get("sub")
     task_id = request.task_id
+    provider_name = request.provider
+
     try:
-        generated_data = await generate_content_with_gemini_service(
-            theme=request.theme,
-            raw_material=request.raw_material[: Config.MAX_TEXT_LEN],
-            content_type=request.content_type,
-        )
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            generated_data = await generate_content_with_provider_service(
+                provider_name=provider_name,
+                theme=request.theme,
+                raw_material=request.raw_material[: Config.MAX_TEXT_LEN],
+                content_type=request.content_type,
+            )
 
-        db_service.save_material(
-            user_id=user_id,
-            automation_request_id=None,
-            task_id=task_id,
-            status="GENERATED",
-            theme=request.theme,
-            content_type=request.content_type,
-            raw_material=request.raw_material,
-            generated_content=json.dumps(generated_data, ensure_ascii=False),
-            suggested_image_prompt=generated_data.get("suggested_image_prompt"),
-        )
+            status_id = db_service.get_status_id_by_name("GENERATED", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status GENERATED não encontrado."
+                )
 
-        return {
-            "message": "Conteúdo gerado com sucesso!",
-            "task_id": task_id,
-            "status": "GENERATED",
-        }
+            db_service.save_material(
+                user_id=user_id,
+                automation_request_id=None,
+                task_id=task_id,
+                status_id=status_id,
+                theme=request.theme,
+                content_type=request.content_type,
+                raw_material=request.raw_material,
+                generated_content=json.dumps(generated_data, ensure_ascii=False),
+                suggested_image_prompt=generated_data.get("suggested_image_prompt"),
+                conn=conn,
+            )
+
+            logger.info(f"Task {task_id} de geração manual salva no DB com sucesso.")
+
+            status = db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                raise HTTPException(
+                    status_code=500, detail=f"Status ID {status_id} não encontrado."
+                )
+            return {
+                "message": "Conteúdo gerado com sucesso!",
+                "task_id": task_id,
+                "status": status,
+                "generated_content": generated_data,
+            }
     except Exception as e:
         logger.error(
-            f"Erro na geração manual de conteúdo para task_id {task_id}: {str(e)}"
+            f"Erro na geração manual de conteúdo para task_id {task_id} (Provedor: {provider_name}): {str(e)}"
         )
-        db_service.update_material_status(user_id, task_id, "FAILED_GENERATION")
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status FAILED_GENERATION não encontrado."
+                )
+            db_service.update_material_status(
+                user_id, task_id, "FAILED_GENERATION", conn=conn
+            )
         raise HTTPException(status_code=500, detail=f"Erro na geração: {str(e)}")
 
 
@@ -397,15 +438,11 @@ async def submit_final_post(
     user: dict = Depends(Auth.verify_token),
 ):
     try:
-        # Acessa o token diretamente do dicionário retornado por Auth.verify_token
-        # Se a chave 'token' estiver presente
         headers = {"Authorization": f"Bearer {user.get('token')}"}
         response = await send_post(request.post_data, headers)
 
         if request.task_id_to_delete:
-            # Usa AsyncDatabaseManager para gerenciar a conexão
             async with AsyncDatabaseManager(DB_FILE) as conn:
-                # Acessa o user_id diretamente da chave 'sub'
                 db_service.delete_material(
                     conn, user.get("sub"), request.task_id_to_delete
                 )
@@ -431,22 +468,37 @@ async def get_task_result(
     user: dict = Depends(Auth.verify_token),
 ):
     try:
-        # Usa AsyncDatabaseManager para gerenciar a conexão
         async with AsyncDatabaseManager(DB_FILE) as conn:
-            # Acessa o user_id diretamente da chave 'sub'
             material = db_service.get_material(conn, user.get("sub"), task_id)
             if not material:
                 raise HTTPException(status_code=404, detail="Task não encontrada")
 
+            raw_material_ids_data = material.get("raw_material_ids")
+            if isinstance(raw_material_ids_data, str):
+                try:
+                    raw_material_ids_list = json.loads(raw_material_ids_data)
+                except json.JSONDecodeError:
+                    raw_material_ids_list = []
+            elif isinstance(raw_material_ids_data, list):
+                raw_material_ids_list = raw_material_ids_data
+            else:
+                raw_material_ids_list = []
+
+            status_id = material.get("status_id")
+            status = db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                raise HTTPException(
+                    status_code=500, detail=f"Status ID {status_id} não encontrado."
+                )
+
             response = MaterialResponse(
-                # Acessa o user_id diretamente da chave 'sub'
                 user_id=user.get("sub"),
                 automation_request_id=material.get("automation_request_id"),
                 task_id=task_id,
-                status=material.get("status"),
+                status=status,
                 theme=material.get("theme"),
                 content_type=material.get("content_type"),
-                raw_material=material.get("raw_material"),
+                raw_material_ids=raw_material_ids_list,
                 generated_content=material.get("generated_content"),
                 suggested_image_prompt=material.get("suggested_image_prompt"),
                 created_at=material.get("created_at"),
@@ -473,27 +525,48 @@ async def list_user_materials(
             materials = db_service.list_user_materials(conn, user.get("sub"))
             if not materials:
                 return []
+            response = []
+            for material in materials:
+                status_id = material.get("status_id")
+                status = db_service.get_status_by_id(status_id, conn=conn)
+                if not status:
+                    logger.warning(
+                        f"Status ID {status_id} não encontrado para material {material.get('task_id')}"
+                    )
+                    status = StatusResponse(
+                        id=status_id,
+                        name="UNKNOWN",
+                        display_name="Desconhecido",
+                        bg_class="from-gray-400 to-gray-500",
+                        text_class="text-gray-800",
+                    )
 
-            response = [
-                MaterialResponse(
-                    user_id=material.get("user_id"),
-                    automation_request_id=material.get("automation_request_id"),
-                    task_id=material.get("task_id"),
-                    status=material.get("status"),
-                    theme=material.get("theme"),
-                    content_type=material.get("content_type"),
-                    raw_material_ids=(
-                        json.loads(material.get("raw_material_ids", "[]"))
-                        if material.get("raw_material_ids")
-                        else []
-                    ),
-                    generated_content=material.get("generated_content"),
-                    suggested_image_prompt=material.get("suggested_image_prompt"),
-                    created_at=material.get("created_at"),
-                    updated_at=material.get("updated_at"),
+                raw_material_ids_data = material.get("raw_material_ids", "[]")
+                if isinstance(raw_material_ids_data, str):
+                    try:
+                        raw_material_ids_list = json.loads(raw_material_ids_data)
+                    except json.JSONDecodeError:
+                        raw_material_ids_list = []
+                elif isinstance(raw_material_ids_data, list):
+                    raw_material_ids_list = raw_material_ids_data
+                else:
+                    raw_material_ids_list = []
+
+                response.append(
+                    MaterialResponse(
+                        user_id=material.get("user_id"),
+                        automation_request_id=material.get("automation_request_id"),
+                        task_id=material.get("task_id"),
+                        status=status,
+                        theme=material.get("theme"),
+                        content_type=material.get("content_type"),
+                        raw_material_ids=raw_material_ids_list,
+                        generated_content=material.get("generated_content"),
+                        suggested_image_prompt=material.get("suggested_image_prompt"),
+                        created_at=material.get("created_at"),
+                        updated_at=material.get("updated_at"),
+                    )
                 )
-                for material in materials
-            ]
             return response
     except Exception as e:
         logger.error(f"Erro ao listar materiais do usuário: {str(e)}")
@@ -507,22 +580,123 @@ async def list_user_materials(
     response_model=ImageGenerationResponse,
     tags=["Automação"],
     summary="Gerar imagem com base em prompt",
-    description="Gera uma imagem usando um prompt fornecido e retorna em base64.",
+    description="Gera uma imagem usando um prompt fornecido e retorna em base64, usando o provedor especificado.",
 )
 async def generate_image(
     request: ImageGenerationRequest,
     user: dict = Depends(Auth.verify_token),
 ):
+    provider_name = request.provider
     try:
-        model = genai.GenerativeModel("gemini-1.5-pro")
-        response = await model.generate_content_async(request.prompt)
-        image_base64 = response.text  # Supondo que a API retorna base64
-        logger.info(f"Imagem gerada para prompt: {request.prompt}")
+        image_provider = get_provider_instance(provider_name)
+        image_base64 = await image_provider.generate_image(request.prompt)
+
+        logger.info(
+            f"Imagem gerada para prompt: {request.prompt} com provedor: {provider_name}"
+        )
         return ImageGenerationResponse(image_base64=image_base64)
     except Exception as e:
-        logger.error(f"Erro ao gerar imagem: {str(e)}")
+        logger.error(
+            f"Erro ao gerar imagem com provedor {provider_name}: {str(e)}",
+            exc_info=True,
+        )
         raise HTTPException(
-            status_code=500, detail=f"Erro na geração de imagem: {str(e)}"
+            status_code=500,
+            detail=f"Erro na geração de imagem com {provider_name}: {str(e)}",
+        )
+
+
+@router.get(
+    "/get-raw-material/{id}",
+    response_model=RawContentResponse,
+    tags=["Matéria Prima"],
+    summary="Obter conteúdo bruto por ID",
+    description="Retorna o conteúdo bruto (raw content) de um material específico.",
+)
+async def get_raw_material(
+    id: str,
+    user: dict = Depends(Auth.verify_token),
+):
+    try:
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            raw_material = db_service.get_raw_material_by_id(conn, id)
+            if not raw_material:
+                raise HTTPException(
+                    status_code=404, detail="Material bruto não encontrado"
+                )
+            return RawContentResponse(raw_content=raw_material.get("content", ""))
+    except Exception as e:
+        logger.error(f"Erro ao obter material bruto {id}: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Erro ao buscar material: {str(e)}"
+        )
+
+
+@router.put(
+    "/update-raw-material/{id}",
+    tags=["Matéria Prima"],
+    summary="Atualizar conteúdo bruto por ID",
+    description="Atualiza o conteúdo bruto de um material, salvando o conteúdo antigo no histórico.",
+)
+async def update_raw_material(
+    id: str,
+    request: UpdateRawMaterialRequest,
+    user: dict = Depends(Auth.verify_token),
+):
+    try:
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            raw_material = db_service.get_raw_material_by_id(conn, id)
+            if not raw_material:
+                raise HTTPException(
+                    status_code=404, detail=f"Material com ID {id} não encontrado."
+                )
+
+            old_content = raw_material["content"]
+            user_id = request.user_id or raw_material.get("user_id")
+            task_id = raw_material.get("task_id")
+
+            # Salvar histórico
+            conn.execute(
+                """
+                INSERT INTO raw_materials_history (raw_material_id, old_content, updated_at, user_id, task_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    id,
+                    old_content,
+                    datetime.now(timezone.utc).isoformat(),
+                    user_id,
+                    task_id,
+                ),
+            )
+
+            # Atualizar material
+            conn.execute(
+                """
+                UPDATE raw_materials
+                SET content = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    request.content,
+                    datetime.now(timezone.utc).isoformat(),
+                    id,
+                ),
+            )
+
+            conn.commit()
+            return {
+                "message": "Conteúdo atualizado com sucesso.",
+                "id": id,
+                "history_saved": True,
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro ao atualizar material bruto {id}: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Erro ao atualizar material: {str(e)}"
         )
 
 
@@ -531,193 +705,108 @@ async def process_material_task(
     automation_request_id: Optional[str],
     task_id: str,
     raw_material_ids: List[str],
+    provider_name: str = "gemini",
 ):
-    # Restante da função...
+    """
+    Função de processamento de material em background.
+    Esta função deve ser chamada pelos seus endpoints de 'trigger'.
+    """
     user_id = user.get("sub") if isinstance(user, dict) else None
     if not user_id:
         logger.error(f"User ID não encontrado no token para task_id {task_id}")
         return
-
     try:
         if not task_id:
             logger.error("Task ID inválido")
             return
-
         if raw_material_ids is None:
             raw_material_ids = []
             logger.warning(f"Lista de raw_material_ids é None para task_id {task_id}")
 
-        # **Cria uma nova conexão aqui**
         async with AsyncDatabaseManager(DB_FILE) as conn:
-            try:
-                # Usa a nova conexão para buscar o material
-                material = db_service.get_material(
-                    conn=conn, user_id=user_id, task_id=task_id
+            material = db_service.get_material(
+                conn=conn, user_id=user_id, task_id=task_id
+            )
+            if not material:
+                logger.error(f"Material não encontrado para task_id {task_id}")
+                status_id = db_service.get_status_id_by_name(
+                    "FAILED_GENERATION", conn=conn
                 )
-                if not material:
-                    logger.error(f"Material não encontrado para task_id {task_id}")
-                    db_service.update_material_status(
-                        conn=conn,
-                        user_id=user_id,
-                        task_id=task_id,
-                        new_status="FAILED_NO_MATERIAL",
+                if not status_id:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Status FAILED_GENERATION não encontrado.",
                     )
-                    return
-            except Exception as mat_err:
-                logger.error(
-                    f"Erro ao obter material para task_id {task_id}: {str(mat_err)}"
-                )
                 db_service.update_material_status(
-                    conn=conn,
-                    user_id=user_id,
-                    task_id=task_id,
-                    new_status="FAILED_NO_MATERIAL",
+                    user_id, task_id, "FAILED_GENERATION", conn=conn
                 )
                 return
 
-            raw_materials = []
+            theme = material.get("theme")
+            content_type = material.get("content_type")
 
-            for raw_id in raw_material_ids:
-                if raw_id:
-                    try:
-                        content = db_service.get_raw_material(
-                            conn=conn, raw_material_id=raw_id
-                        )
-                        if (
-                            content
-                            and isinstance(content, dict)
-                            and content.get("content")
-                        ):
-                            raw_materials.append(content.get("content"))
-                    except Exception as raw_err:
-                        logger.error(
-                            f"Erro ao obter raw material {raw_id}: {str(raw_err)}"
-                        )
+            raw_materials = db_service.get_raw_materials_by_ids(conn, raw_material_ids)
+            raw_material_content = "\n\n---\n\n".join(
+                [rm.get("content", "") for rm in raw_materials]
+            )
 
-            if not raw_materials:
-                logger.error(f"Nenhum conteúdo válido para task_id {task_id}")
-                db_service.update_material_status(
-                    conn=conn,
-                    user_id=user_id,
-                    task_id=task_id,
-                    new_status="FAILED_NO_CONTENT",
-                )
-                return
-
-            compiled_raw_material = "\n\n".join(raw_materials)
-
-            max_text_len = 10000
-            if len(compiled_raw_material) > max_text_len:
-                compiled_raw_material = compiled_raw_material[:max_text_len]
-
-            theme = "Desconhecido"
-            content_type = "article"
-
-            if material and isinstance(material, dict):
-                theme = material.get("theme", "Desconhecido")
-                content_type = material.get("content_type", "article")
-
-            try:
-                db_service.update_material_status(
-                    conn=conn,
-                    user_id=user_id,
-                    task_id=task_id,
-                    new_status="PENDING_GENERATION",
-                )
-            except Exception as status_err:
-                logger.error(
-                    f"Erro ao atualizar status para PENDING_GENERATION: {str(status_err)}"
-                )
-
-        # A lógica de geração de conteúdo deve ser executada fora do bloco 'with' para evitar bloqueio
-        generated_data = None
-        try:
-            generated_data = await generate_content_with_gemini_service(
+            generated_data = await generate_content_with_provider_service(
+                provider_name=provider_name,
                 theme=theme,
-                raw_material=compiled_raw_material,
+                raw_material=raw_material_content,
                 content_type=content_type,
             )
-        except Exception as gen_err:
-            logger.error(f"Erro ao gerar conteúdo com Gemini: {str(gen_err)}")
 
-        if generated_data is None or not isinstance(generated_data, dict):
-            logger.warning(
-                f"Dados gerados inválidos para task_id {task_id}, usando conteúdo padrão"
+            status_id = db_service.get_status_id_by_name("GENERATED", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status GENERATED não encontrado."
+                )
+
+            db_service.save_material(
+                user_id=user_id,
+                automation_request_id=automation_request_id,
+                task_id=task_id,
+                status_id=status_id,
+                theme=theme,
+                content_type=content_type,
+                raw_material=raw_material_content,
+                generated_content=json.dumps(generated_data, ensure_ascii=False),
+                suggested_image_prompt=generated_data.get("suggested_image_prompt"),
+                conn=conn,
             )
-            generated_data = {
-                "title": f"Conteúdo para {theme}",
-                "content_pt": "Não foi possível gerar conteúdo automaticamente.",
-                "content_en": "Content could not be generated automatically.",
-                "content_es": "No se pudo generar contenido automáticamente.",
-                "suggested_image_prompt": f"Image for {theme}",
-            }
 
-        suggested_image_prompt = generated_data.get(
-            "suggested_image_prompt", f"Image for {theme}"
-        )
-
-        try:
-            # **Cria uma nova conexão para a gravação final**
-            async with AsyncDatabaseManager(DB_FILE) as conn:
-                db_service.save_material(
-                    conn=conn,
-                    user_id=user_id,
-                    automation_request_id=automation_request_id,
-                    task_id=task_id,
-                    status="GENERATED",
-                    theme=theme,
-                    content_type=content_type,
-                    raw_material_ids=(
-                        ",".join(raw_material_ids) if raw_material_ids else ""
-                    ),
-                    generated_content=json.dumps(generated_data, ensure_ascii=False),
-                    suggested_image_prompt=suggested_image_prompt,
-                )
-                logger.info(f"Material processado com sucesso para task_id {task_id}")
-        except Exception as save_err:
-            logger.error(f"Erro ao salvar material processado: {str(save_err)}")
-            try:
-                async with AsyncDatabaseManager(DB_FILE) as conn:
-                    db_service.update_material_status(
-                        conn=conn,
-                        user_id=user_id,
-                        task_id=task_id,
-                        new_status="FAILED_GENERATION",
-                    )
-            except Exception as update_err:
-                logger.error(
-                    f"Erro ao atualizar status para FAILED_GENERATION: {str(update_err)}"
-                )
+            logger.info(f"Task {task_id} processada e salva com status GENERATED.")
 
     except Exception as e:
-        logger.error(f"Erro ao processar material para task_id {task_id}: {str(e)}")
-        try:
-            async with AsyncDatabaseManager(DB_FILE) as conn:
-                db_service.update_material_status(
-                    conn=conn,
-                    user_id=user_id,
-                    task_id=task_id,
-                    new_status="FAILED_PROCESSING",
+        logger.error(
+            f"Erro CRÍTICO no processamento da task {task_id}: {str(e)}", exc_info=True
+        )
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status FAILED_GENERATION não encontrado."
                 )
-        except Exception as final_err:
-            logger.error(f"Erro final ao atualizar status: {str(final_err)}")
+            db_service.update_material_status(
+                user_id, task_id, "FAILED_GENERATION", conn=conn
+            )
 
 
-# Rota para salvar o material bruto, sem disparar a automação
 @router.post(
     "/trigger-by-url",
     response_model=TriggerResponse,
     tags=["trigger-automation"],
-    summary="Acionar automação por URL",
-    description="Extrai conteúdo de uma URL específica e salva o material bruto sem iniciar a geração.",
+    summary="Acionar scraping por URL",
+    description="Extrai conteúdo de uma URL específica, salva o material bruto e **retorna o task_id** para acionamento posterior da geração.",
 )
 async def trigger_by_url(
     request: UrlRequest,
     user: dict = Depends(Auth.verify_token),
 ):
     """
-    Aciona a automação para uma URL, extraindo o conteúdo e salvando
-    a tarefa para ser processada posteriormente.
+    Aciona o scraping para uma URL, gerando um task_id e salvando
+    o material bruto sem iniciar a geração.
     """
     task_id = str(uuid.uuid4())
     user_id = user.get("sub")
@@ -726,39 +815,67 @@ async def trigger_by_url(
         raise HTTPException(status_code=401, detail="User ID not found in token")
 
     try:
-        # Usar uma única conexão para todas as operações e garantir que ela seja fechada corretamente
         async with AsyncDatabaseManager(DB_FILE) as conn:
-            # Passa a conexão `conn` para as funções de serviço
-            automation_request_id = db_service.create_automation_request(
-                conn=conn,
+            status_id = db_service.get_status_id_by_name(
+                "PENDING_COLLECTION", conn=conn
+            )
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status PENDING_COLLECTION não encontrado."
+                )
+
+            db_service.save_material(
                 user_id=user_id,
+                automation_request_id=None,
                 task_id=task_id,
-                url=str(request.url),
-                theme=request.theme,
-                output_format=request.content_type,
+                status_id=status_id,
+                theme=None,
+                content_type=None,
+                source_urls=[str(request.url)],
+                conn=conn,
             )
 
             content = await fetch_url_content(str(request.url))
             if not content:
+                status_id = db_service.get_status_id_by_name(
+                    "COLLECTION_FAILED", conn=conn
+                )
+                if not status_id:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Status COLLECTION_FAILED não encontrado.",
+                    )
                 db_service.update_material_status(
                     conn=conn,
                     user_id=user_id,
                     task_id=task_id,
-                    new_status="COLLECTION_FAILED",
+                    new_status_name="COLLECTION_FAILED",
                 )
                 raise HTTPException(
-                    status_code=400, detail="Nenhum conteúdo extraído da URL"
+                    status_code=400,
+                    detail=f"Não foi possível extrair conteúdo da URL: {request.url}",
                 )
 
             cleaned_content = clean_html_content(content)
             if not cleaned_content:
+                status_id = db_service.get_status_id_by_name(
+                    "COLLECTION_FAILED", conn=conn
+                )
+                if not status_id:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Status COLLECTION_FAILED não encontrado.",
+                    )
                 db_service.update_material_status(
                     conn=conn,
                     user_id=user_id,
                     task_id=task_id,
-                    new_status="COLLECTION_FAILED",
+                    new_status_name="COLLECTION_FAILED",
                 )
-                raise HTTPException(status_code=400, detail="Conteúdo limpo inválido")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Não foi possível extrair conteúdo limpo da URL: {request.url}",
+                )
 
             raw_id = db_service.save_raw_material(
                 conn=conn,
@@ -768,110 +885,96 @@ async def trigger_by_url(
                 content=cleaned_content,
             )
 
-            db_service.update_material_with_raw_id(
-                conn=conn, task_id=task_id, raw_material_id=raw_id
+            db_service.update_material_raw_material_ids(
+                conn=conn,
+                task_id=task_id,
+                raw_material_ids=[raw_id],
             )
 
+            status_id = db_service.get_status_id_by_name("RAW_COLLECTED", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status RAW_COLLECTED não encontrado."
+                )
             db_service.update_material_status(
-                conn=conn, user_id=user_id, task_id=task_id, new_status="RAW_COLLECTED"
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status_name="RAW_COLLECTED",
             )
 
-        return TriggerResponse(
-            message=f"Material bruto salvo com sucesso. A tarefa está pronta para ser processada. Use o task_id para iniciar a geração.",
-            task_id=task_id,
-            status="RAW_MATERIAL_SAVED",
-        )
-    except Exception as e:
-        logger.error(f"Erro ao acionar automação por URL: {str(e)}")
-        raise HTTPException(
-            status_code=500, detail=f"Erro ao acionar automação: {str(e)}"
-        )
-
-
-# Rota para disparar a geração de conteúdo
-@router.post(
-    "/generate/{task_id}",
-    tags=["generate-content"],
-    summary="Gerar conteúdo sob demanda",
-    description="Inicia a tarefa de geração de conteúdo para um task_id existente.",
-)
-async def generate_content_api(
-    task_id: str,
-    background_tasks: BackgroundTasks,
-    user: dict = Depends(Auth.verify_token),
-):
-    """
-    Inicia a tarefa de segundo plano para gerar conteúdo.
-    """
-    try:
-        user_id = user.get("sub")
-        # Usar o gerenciador de contexto para a conexão
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-            # Passa a conexão `conn` para a função de serviço
-            material = db_service.get_material(
-                conn=conn, user_id=user_id, task_id=task_id
+            status = db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                raise HTTPException(
+                    status_code=500, detail=f"Status ID {status_id} não encontrado."
+                )
+            return TriggerResponse(
+                trigger_id=None,
+                message=f"Extração concluída para {request.url}. Use o task_id para iniciar a geração.",
+                task_id=task_id,
+                status=status,
             )
 
-            if not material:
-                raise HTTPException(status_code=404, detail="Task ID not found.")
-
-        # Dispara a tarefa de segundo plano
-        background_tasks.add_task(
-            process_material_task,
-            user=user,
-            automation_request_id=material.get("automation_request_id"),
-            task_id=task_id,
-        )
-
-        logger.info(f"Tarefa de geração de conteúdo para {task_id} iniciada.")
-
-        return {
-            "message": f"Tarefa de geração de conteúdo para {task_id} iniciada com sucesso. Verifique o status para o resultado."
-        }
-    except HTTPException as e:
-        logger.error(f"Erro HTTP na API: {e.detail}")
+    except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Erro ao iniciar a tarefa de geração para {task_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Erro interno no servidor.")
+        logger.error(f"Erro na extração para task_id {task_id}: {str(e)}")
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("COLLECTION_FAILED", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status COLLECTION_FAILED não encontrado."
+                )
+            db_service.update_material_status(
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status_name="COLLECTION_FAILED",
+            )
+        raise HTTPException(status_code=500, detail=f"Erro na extração: {str(e)}")
 
 
 @router.post(
     "/trigger-multiple-urls",
     response_model=TriggerResponse,
     tags=["trigger-automation"],
-    summary="Extrair conteúdo de múltiplas URLs",
-    description="Extrai conteúdo de uma lista de URLs, salva em raw_materials e inicia a geração em segundo plano.",
+    summary="Acionar scraping por várias URLs",
+    description="Extrai conteúdo de várias URLs, salva os materiais brutos e retorna o task_id.",
 )
 async def trigger_multiple_urls(
     request: ExtractFromUrlsRequest,
-    background_tasks: BackgroundTasks,
     user: dict = Depends(Auth.verify_token),
 ):
     task_id = str(uuid.uuid4())
     user_id = user.get("sub")
-    theme = request.theme or "Desconhecido"
-    content_type = request.output_format or Config.OUTPUT_FORMAT
+    raw_material_ids = []
 
     try:
-        # Usa uma única transação para todas as operações
         async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name(
+                "PENDING_COLLECTION", conn=conn
+            )
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status PENDING_COLLECTION não encontrado."
+                )
+
             db_service.save_material(
-                conn=conn,
                 user_id=user_id,
                 automation_request_id=None,
                 task_id=task_id,
-                status="PENDING_COLLECTION",
-                theme=theme,
-                content_type=content_type,
+                status_id=status_id,
+                theme=None,
+                content_type=None,
+                source_urls=[str(url) for url in request.urls],
+                conn=conn,
             )
 
-            raw_material_ids = []
             for url in request.urls:
-                logger.info(f"Tentando extrair conteúdo da URL: {url}")
-                content = await fetch_url_content(url)
+                url_str = str(url)
+                content = await fetch_url_content(url_str)
                 if not content:
-                    logger.warning(f"Nenhum conteúdo retornado para a URL: {url}")
+                    logger.warning(f"Nenhum conteúdo retornado para a URL: {url_str}")
                     continue
 
                 cleaned_content = clean_html_content(content)
@@ -880,17 +983,25 @@ async def trigger_multiple_urls(
                         conn=conn,
                         user_id=user_id,
                         task_id=task_id,
-                        url=url,
+                        url=url_str,
                         content=cleaned_content,
                     )
                     raw_material_ids.append(raw_id)
 
             if not raw_material_ids:
+                status_id = db_service.get_status_id_by_name(
+                    "COLLECTION_FAILED", conn=conn
+                )
+                if not status_id:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Status COLLECTION_FAILED não encontrado.",
+                    )
                 db_service.update_material_status(
                     conn=conn,
                     user_id=user_id,
                     task_id=task_id,
-                    new_status="COLLECTION_FAILED",
+                    new_status_name="COLLECTION_FAILED",
                 )
                 raise HTTPException(
                     status_code=400,
@@ -902,41 +1013,45 @@ async def trigger_multiple_urls(
                 task_id=task_id,
                 raw_material_ids=raw_material_ids,
             )
-            db_service.update_material_status(
-                conn=conn, user_id=user_id, task_id=task_id, new_status="RAW_COLLECTED"
-            )
-
-        # Adicione um pequeno atraso para garantir o commit
-        await asyncio.sleep(1)
-
-        # Dispara a tarefa de segundo plano passando apenas os IDs
-        # background_tasks.add_task(
-        #     process_material_task,
-        #     user=user,
-        #     automation_request_id=None,
-        #     task_id=task_id,
-        #     raw_material_ids=raw_material_ids,
-        # )
-
-        return TriggerResponse(
-            trigger_id=None,
-            message="Extração de URLs concluída. Geração de conteúdo será iniciada separadamente.",
-            task_id=task_id,
-            status="RAW_COLLECTED",
-        )
-
-    except HTTPException:
-        # Propaga o erro HTTP sem alterar
-        raise
-    except Exception as e:
-        logger.error(f"Erro na extração de URLs para task_id {task_id}: {str(e)}")
-        # A nova conexão para atualização de status já está no bloco principal
-        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("RAW_COLLECTED", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status RAW_COLLECTED não encontrado."
+                )
             db_service.update_material_status(
                 conn=conn,
                 user_id=user_id,
                 task_id=task_id,
-                new_status="COLLECTION_FAILED",
+                new_status_name="RAW_COLLECTED",
+            )
+
+            status = db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                raise HTTPException(
+                    status_code=500, detail=f"Status ID {status_id} não encontrado."
+                )
+            return TriggerResponse(
+                trigger_id=None,
+                message=f"Extração de {len(raw_material_ids)} URLs concluída. Use o task_id para iniciar a geração de conteúdo.",
+                task_id=task_id,
+                status=status,
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro na extração de URLs para task_id {task_id}: {str(e)}")
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("COLLECTION_FAILED", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status COLLECTION_FAILED não encontrado."
+                )
+            db_service.update_material_status(
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status_name="COLLECTION_FAILED",
             )
         raise HTTPException(status_code=500, detail=f"Erro na extração: {str(e)}")
 
@@ -945,76 +1060,128 @@ async def trigger_multiple_urls(
     "/generate-content",
     tags=["generate-content"],
     summary="Gerar conteúdo sob demanda",
-    description="Gera conteúdo com base em um task_id existente, usando materiais brutos salvos no banco.",
+    description="Gera conteúdo com base em um task_id existente, usando materiais brutos salvos no banco e o provedor de IA especificado.",
 )
 async def generate_content(
     request: GenerateContentRequest,
     user: dict = Depends(Auth.verify_token),
 ):
-    user_id = request.user_id
+    user_id = user.get("sub")
     task_id = request.task_id
-    theme = request.theme or "Desconhecido"
-    content_type = request.output_format or Config.OUTPUT_FORMAT
+    theme = request.theme
+    content_type = request.output_format
+    provider_name = request.provider
 
     try:
-        material = db_service.get_material(user_id, task_id)
-        if not material or not material.get("raw_material_ids"):
-            raise HTTPException(
-                status_code=404,
-                detail="Nenhum material bruto encontrado para o task_id",
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            material = db_service.get_material(conn, user_id, task_id)
+            if not material or not material.get("raw_material_ids"):
+                raise HTTPException(
+                    status_code=404,
+                    detail="Nenhum material bruto encontrado para o task_id",
+                )
+
+            raw_material_ids = material["raw_material_ids"]
+            if isinstance(raw_material_ids, str):
+                try:
+                    raw_material_ids = json.loads(raw_material_ids)
+                except json.JSONDecodeError:
+                    raw_material_ids = []
+
+            raw_materials_records = db_service.get_raw_materials_by_ids(
+                conn, raw_material_ids
             )
 
-        raw_materials = []
-        for raw_id in material["raw_material_ids"]:
-            content = db_service.get_raw_material(raw_id)
-            if content:
-                raw_materials.append(content)
+            raw_materials = [
+                record.get("content", "")
+                for record in raw_materials_records
+                if record.get("content")
+            ]
 
-        if not raw_materials:
-            raise HTTPException(
-                status_code=400,
-                detail="Nenhum conteúdo válido encontrado nos raw_material_ids",
+            if not raw_materials:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Nenhum conteúdo válido encontrado nos raw_material_ids",
+                )
+
+            compiled_raw_material = "\n\n---\n\n".join(raw_materials)[
+                : Config.MAX_TEXT_LEN
+            ]
+
+            status_id = db_service.get_status_id_by_name(
+                "PENDING_GENERATION", conn=conn
+            )
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status PENDING_GENERATION não encontrado."
+                )
+            db_service.update_material_status(
+                user_id, task_id, "PENDING_GENERATION", conn=conn
             )
 
-        compiled_raw_material = "\n\n".join(raw_materials)[: Config.MAX_TEXT_LEN]
+            generated_data = await generate_content_with_provider_service(
+                provider_name=provider_name,
+                theme=theme,
+                raw_material=compiled_raw_material,
+                content_type=content_type,
+            )
 
-        db_service.save_material(
-            user_id=user_id,
-            automation_request_id=material.get("automation_request_id"),
-            task_id=task_id,
-            status="PENDING_GENERATION",
-            theme=theme,
-            content_type=content_type,
-            raw_material_ids=material["raw_material_ids"],
-        )
+            status_id = db_service.get_status_id_by_name("GENERATED", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status GENERATED não encontrado."
+                )
+            db_service.save_material(
+                user_id=user_id,
+                automation_request_id=material.get("automation_request_id"),
+                task_id=task_id,
+                status_id=status_id,
+                theme=theme,
+                content_type=content_type,
+                raw_material=compiled_raw_material,
+                generated_content=json.dumps(generated_data, ensure_ascii=False),
+                suggested_image_prompt=generated_data.get("suggested_image_prompt"),
+                conn=conn,
+            )
 
-        generated_data = await generate_content_with_gemini_service(
-            theme=theme,
-            raw_material=compiled_raw_material,
-            content_type=content_type,
-        )
+            logger.info(
+                f"Conteúdo gerado sob demanda para task_id {task_id} com sucesso. Provedor: {provider_name}"
+            )
 
-        db_service.save_material(
-            user_id=user_id,
-            automation_request_id=material.get("automation_request_id"),
-            task_id=task_id,
-            status="GENERATED",
-            theme=theme,
-            content_type=content_type,
-            raw_material_ids=material["raw_material_ids"],
-            generated_content=json.dumps(generated_data, ensure_ascii=False),
-            suggested_image_prompt=generated_data.get("suggested_image_prompt"),
-        )
+            status = db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                raise HTTPException(
+                    status_code=500, detail=f"Status ID {status_id} não encontrado."
+                )
+            return {
+                "message": "Conteúdo gerado com sucesso!",
+                "task_id": task_id,
+                "status": status,
+                "generated_content": generated_data,
+            }
 
-        return {
-            "message": "Conteúdo gerado com sucesso!",
-            "task_id": task_id,
-            "status": "GENERATED",
-        }
-
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Erro na geração de conteúdo para task_id {task_id}: {str(e)}")
-        db_service.update_material_status(user_id, task_id, "FAILED_GENERATION")
+        logger.error(
+            f"Erro na geração de conteúdo sob demanda para task_id {task_id}: {str(e)}",
+            exc_info=True,
+        )
+        try:
+            async with AsyncDatabaseManager(DB_FILE) as conn:
+                status_id = db_service.get_status_id_by_name(
+                    "FAILED_GENERATION", conn=conn
+                )
+                if not status_id:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Status FAILED_GENERATION não encontrado.",
+                    )
+                db_service.update_material_status(
+                    user_id, task_id, "FAILED_GENERATION", conn=conn
+                )
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=f"Erro na geração: {str(e)}")
 
 
@@ -1057,20 +1224,36 @@ async def get_raw_materials_by_task(
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
 
     raw_material_ids = material.get("raw_material_ids", [])
+    if isinstance(raw_material_ids, str):
+        try:
+            raw_material_ids = json.loads(raw_material_ids)
+        except json.JSONDecodeError:
+            raw_material_ids = []
+
     raw_materials = db_service.get_raw_materials_by_ids(conn, raw_material_ids)
 
     return {"raw_materials": raw_materials}
 
 
-# Modelo Pydantic para o corpo da requisição
 class ContentInput(BaseModel):
     user_id: str = Field(..., alias="userId")
     text_content: str = Field(..., alias="textContent")
-    content_type: str = Field("artigo", alias="contentType")
-    theme: str = Field("tema_padrao", alias="theme")
+    content_type: str = Field(..., alias="contentType")
+    provider: str = Field(
+        "gemini", description="O provedor de IA a ser usado (ex: 'gemini', 'deepseek')."
+    )
 
     class Config:
         allow_population_by_field_name = True
+
+
+THEME_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "theme": {"type": "string", "description": "O tema principal do texto."},
+    },
+    "required": ["theme"],
+}
 
 
 @router.post(
@@ -1084,68 +1267,73 @@ async def trigger_by_text(
     payload: ContentInput, conn: sqlite3.Connection = Depends(get_db_connection)
 ):
     """
-    Recebe um texto de matéria, extrai um tema com o Gemini,
+    Recebe um texto de matéria, extrai um tema com o provedor de IA,
     salva o material bruto no SQLite e os metadados no PostgreSQL.
     """
     logger.info("Nova requisição recebida na rota /api/trigger-by-text")
+    provider_name = payload.provider
 
     try:
-        # 1. Usar a IA para extrair o tema
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        model = genai.GenerativeModel("gemini-1.5-pro")
-
+        logger.info(f"Extraindo tema com o provedor: {provider_name}")
+        provider = get_provider_instance(provider_name)
         prompt = (
             "A partir do seguinte texto, identifique um único tema principal ou título. "
-            "Sua resposta deve ser apenas o tema, sem texto adicional. "
-            "Texto: " + payload.text_content[:2000]  # Limita o texto para o prompt
+            "Sua resposta DEVE estar estritamente no formato JSON fornecido. "
+            "Texto: " + payload.text_content[:2000]
         )
 
-        response = model.generate_content(prompt)
-        ai_theme = response.text.strip().replace('"', "")
-
+        ai_response = await provider.generate_content(
+            prompt=prompt, response_schema=THEME_SCHEMA
+        )
+        ai_theme = (
+            ai_response.get("theme", "Tema Desconhecido").strip().replace('"', "")
+        )
         logger.info(f"Tema extraído pela IA: '{ai_theme}'")
 
-        # 2. Salvar o material bruto no SQLite
         raw_material_id = str(uuid.uuid4())
-
         db_service.save_raw_material(
             conn=conn,
-            raw_material_id=raw_material_id,
-            url=None,  # Não há URL neste fluxo
+            user_id=payload.user_id,
+            task_id=str(uuid.uuid4()),
+            url=None,
             content=payload.text_content,
+            raw_material_id=raw_material_id,
         )
         logger.info(f"Material bruto salvo no SQLite com ID: {raw_material_id}")
 
-        # 3. Preparar e salvar os dados no PostgreSQL
         task_id = str(uuid.uuid4())
-
-        postgres_payload = {
-            "user_id": payload.user_id,
-            "automation_request_id": str(uuid.uuid4()),
-            "task_id": task_id,
-            "status": "RAW_COLLECTED",
-            "theme": ai_theme,
-            "content_type": payload.content_type,
-            "raw_material_ids": [raw_material_id],  # Salva a lista de IDs brutos
-        }
-
-        saved_record = pg_service.save_automation_data_to_postgres(postgres_payload)
-
-        if not saved_record:
+        status_id = db_service.get_status_id_by_name("RAW_COLLECTED", conn=conn)
+        if not status_id:
             raise HTTPException(
-                status_code=500, detail="Erro ao salvar dados no PostgreSQL."
+                status_code=500, detail="Status RAW_COLLECTED não encontrado."
             )
 
-        # 4. Retornar a resposta
+        db_service.save_material(
+            conn=conn,
+            user_id=payload.user_id,
+            automation_request_id=None,
+            task_id=task_id,
+            status_id=status_id,
+            theme=ai_theme,
+            content_type=payload.content_type,
+            raw_material=payload.text_content,
+            raw_material_ids=[raw_material_id],
+        )
+
+        status = db_service.get_status_by_id(status_id, conn=conn)
+        if not status:
+            raise HTTPException(
+                status_code=500, detail=f"Status ID {status_id} não encontrado."
+            )
         return {
             "message": "Tema gerado e dados salvos. Use o task_id para iniciar a automação.",
             "task_id": task_id,
             "theme": ai_theme,
-            "automation_request_id": saved_record.get("automation_request_id"),
+            "automation_request_id": None,
+            "status": status,
         }
 
     except HTTPException:
-        # Propaga o erro HTTP
         raise
     except Exception as e:
         logger.error(f"Erro na automação por texto: {str(e)}", exc_info=True)
@@ -1173,6 +1361,23 @@ async def trigger_automation_post(
     task_id = str(uuid.uuid4())
 
     try:
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("PENDING", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status PENDING não encontrado."
+                )
+
+            db_service.save_material(
+                user_id=user_id,
+                automation_request_id=None,
+                task_id=task_id,
+                status_id=status_id,
+                theme=theme,
+                content_type=output_format,
+                conn=conn,
+            )
+
         output_report = await run_automation(
             output_format=output_format,
             theme=theme,
@@ -1185,10 +1390,24 @@ async def trigger_automation_post(
         if not isinstance(output_report, str):
             output_report = str(output_report)
 
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("GENERATED", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status GENERATED não encontrado."
+                )
+            status = db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                raise HTTPException(
+                    status_code=500, detail=f"Status ID {status_id} não encontrado."
+                )
+
         return JSONResponse(
             content={
                 "message": "Automação executada com sucesso!",
                 "report_summary": output_report,
+                "task_id": task_id,
+                "status": status,
                 "parameters": {"output_format": output_format, "theme": theme},
             },
             media_type="application/json; charset=utf-8",
@@ -1206,6 +1425,15 @@ async def trigger_automation_post(
                 "report_id": task_id,
             }
             send_logs_to_backend(log_data)
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status FAILED_GENERATION não encontrado."
+                )
+            db_service.update_material_status(
+                user_id, task_id, "FAILED_GENERATION", conn=conn
+            )
         raise HTTPException(
             status_code=400,
             detail={"message": "Erro de validação.", "errors": e.errors()},
@@ -1222,6 +1450,15 @@ async def trigger_automation_post(
                 "report_id": task_id,
             }
             send_logs_to_backend(log_data)
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status FAILED_GENERATION não encontrado."
+                )
+            db_service.update_material_status(
+                user_id, task_id, "FAILED_GENERATION", conn=conn
+            )
         raise
     except Exception as e:
         logger.error(f"Erro inesperado: {str(e)}")
@@ -1235,6 +1472,15 @@ async def trigger_automation_post(
                 "report_id": task_id,
             }
             send_logs_to_backend(log_data)
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status FAILED_GENERATION não encontrado."
+                )
+            db_service.update_material_status(
+                user_id, task_id, "FAILED_GENERATION", conn=conn
+            )
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 
@@ -1283,33 +1529,47 @@ async def trigger_by_id(
             f"Parâmetros do DB: output_format='{output_format}', theme='{theme}'"
         )
 
-        db_service.save_material(
-            user_id=user_id,
-            task_id=task_id,
-            theme=theme,
-            raw_material="",
-            source_urls=[],
-            content_type=output_format,
-            status="PENDING_COLLECTION",
-        )
-        logger.info(f"Tarefa '{task_id}' salva para coleta.")
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name(
+                "PENDING_COLLECTION", conn=conn
+            )
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status PENDING_COLLECTION não encontrado."
+                )
 
-        background_tasks.add_task(
-            run_automation,
-            output_format=output_format,
-            theme=theme,
-            auth_headers={"Authorization": f"Bearer {user_payload.get('token')}"},
-            user_id=user_id,
-            task_id=task_id,
-            return_raw_material_only=True,
-        )
+            db_service.save_material(
+                user_id=user_id,
+                automation_request_id=id,
+                task_id=task_id,
+                status_id=status_id,
+                theme=theme,
+                content_type=output_format,
+                conn=conn,
+            )
+            logger.info(f"Tarefa '{task_id}' salva para coleta.")
 
-        return TriggerResponse(
-            trigger_id=id,
-            message="Coleta de material iniciada em segundo plano.",
-            task_id=task_id,
-            status="PENDING_COLLECTION",
-        )
+            background_tasks.add_task(
+                run_automation,
+                output_format=output_format,
+                theme=theme,
+                auth_headers={"Authorization": f"Bearer {user_payload.get('token')}"},
+                user_id=user_id,
+                task_id=task_id,
+                return_raw_material_only=True,
+            )
+
+            status = db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                raise HTTPException(
+                    status_code=500, detail=f"Status ID {status_id} não encontrado."
+                )
+            return TriggerResponse(
+                trigger_id=str(id),
+                message="Coleta de material iniciada em segundo plano.",
+                task_id=task_id,
+                status=status,
+            )
 
     except HTTPException as http_exc:
         logger.error(f"Erro HTTP para ID {id}: {http_exc.detail}")
@@ -1323,6 +1583,15 @@ async def trigger_by_id(
                 "report_id": task_id,
             }
             send_logs_to_backend(log_data)
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status FAILED_GENERATION não encontrado."
+                )
+            db_service.update_material_status(
+                user_id, task_id, "FAILED_GENERATION", conn=conn
+            )
         raise
     except Exception as e:
         logger.error(f"Erro inesperado para ID {id}: {str(e)}")
@@ -1336,6 +1605,15 @@ async def trigger_by_id(
                 "report_id": task_id,
             }
             send_logs_to_backend(log_data)
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status FAILED_GENERATION não encontrado."
+                )
+            db_service.update_material_status(
+                user_id, task_id, "FAILED_GENERATION", conn=conn
+            )
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 
@@ -1356,34 +1634,19 @@ def list_posts():
 
         cursor.execute("SELECT * FROM materials ORDER BY created_at DESC")
         materials = cursor.fetchall()
-        conn.close()
 
         posts = []
         for row in materials:
-            status = row["status"]
-            status_label = (
-                "Finalizado"
-                if status == "COMPLETED"
-                else (
-                    "Em andamento"
-                    if status in ("PENDING", "RAW_COLLECTED")
-                    else "Falhou"
+            status_id = row["status_id"]
+            status = db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                status = StatusResponse(
+                    id=status_id,
+                    name="UNKNOWN",
+                    display_name="Desconhecido",
+                    bg_class="from-gray-400 to-gray-500",
+                    text_class="text-gray-800",
                 )
-            )
-            status_color = (
-                "green"
-                if status == "COMPLETED"
-                else "yellow" if status in ("PENDING", "RAW_COLLECTED") else "red"
-            )
-            gradient = (
-                "from-indigo-500 to-purple-500"
-                if status == "COMPLETED"
-                else (
-                    "from-yellow-400 to-orange-400"
-                    if status in ("PENDING", "RAW_COLLECTED")
-                    else "from-red-400 to-pink-500"
-                )
-            )
 
             posts.append(
                 {
@@ -1395,13 +1658,14 @@ def list_posts():
                     )[:250],
                     "date": row["created_at"][:10] if row["created_at"] else "",
                     "status": status,
-                    "statusLabel": status_label,
-                    "statusColor": status_color,
+                    "statusLabel": status["display_name"],
+                    "statusColor": status["text_class"].replace("text-", ""),
                     "tags": [row["content_type"] or "geral"],
-                    "gradient": gradient,
+                    "gradient": status["bg_class"],
                     "panelDetails": None,
                 }
             )
+        conn.close()
         return {"data": posts, "count": len(posts)}
 
     except Exception as e:
@@ -1427,205 +1691,102 @@ def get_post_by_id(task_id: str):
         material = cursor.fetchone()
 
         if not material:
-            raise HTTPException(status_code=404, detail="Post não encontrado")
+            conn.close()
+            raise HTTPException(status_code=404, detail="Tarefa não encontrada")
 
-        cursor.execute("SELECT * FROM raw_materials WHERE task_id = ?", (task_id,))
-        raw_materials = cursor.fetchall()
-        conn.close()
-
-        raw_texts = [r["content"] for r in raw_materials]
-        raw_material_combined = (
-            "\n\n".join(raw_texts) if raw_texts else "(sem material bruto)"
-        )
-
-        status = material["status"]
-        status_label = (
-            "Finalizado"
-            if status == "COMPLETED"
-            else (
-                "Em andamento" if status in ("PENDING", "RAW_COLLECTED") else "Falhou"
+        status_id = material["status_id"]
+        status = db_service.get_status_by_id(status_id, conn=conn)
+        if not status:
+            status = StatusResponse(
+                id=status_id,
+                name="UNKNOWN",
+                display_name="Desconhecido",
+                bg_class="from-gray-400 to-gray-500",
+                text_class="text-gray-800",
             )
-        )
-        status_color = (
-            "green"
-            if status == "COMPLETED"
-            else "yellow" if status in ("PENDING", "RAW_COLLECTED") else "red"
-        )
 
-        post = {
+        raw_material_ids_data = material["raw_material_ids"]
+        if isinstance(raw_material_ids_data, str):
+            try:
+                raw_material_ids_list = json.loads(raw_material_ids_data)
+            except json.JSONDecodeError:
+                raw_material_ids_list = []
+        else:
+            raw_material_ids_list = raw_material_ids_data or []
+
+        raw_materials = db_service.get_raw_materials_by_ids(conn, raw_material_ids_list)
+
+        response = {
             "id": material["task_id"],
-            "title": material["theme"],
-            "subtitle": f"Tipo: {material['content_type'] or 'Desconhecido'}",
-            "statusLabel": status_label,
-            "statusColor": status_color,
-            "tags": [material["content_type"] or "Geral"],
-            "date": material["created_at"][:10] if material["created_at"] else "",
-            "description": (material["generated_content"] or "Aguardando geração...")[
-                :300
+            "user_id": material["user_id"],
+            "automation_request_id": material["automation_request_id"],
+            "status": status,
+            "theme": material["theme"],
+            "content_type": material["content_type"],
+            "raw_material_ids": raw_material_ids_list,
+            "raw_materials": [
+                {"id": rm["id"], "content": rm["content"], "url": rm["url"]}
+                for rm in raw_materials
             ],
-            "panelDetails": {
-                "raw_material": raw_material_combined,
-                "generated_content_preview": {
-                    "summary": (material["generated_content"] or "sem conteúdo gerado")[
-                        :500
-                    ],
-                    "topics": ["Introdução", "Análise", "Conclusão"],
-                },
-                "image_prompt": material["suggested_image_prompt"]
-                or "sem prompt definido",
-                "logs": [
-                    f"Status atual: {status_label}",
-                    f"Atualizado em: {material['updated_at']}",
-                    f"Task ID: {task_id}",
-                ],
-            },
+            "generated_content": material["generated_content"],
+            "suggested_image_prompt": material["suggested_image_prompt"],
+            "created_at": material["created_at"],
+            "updated_at": material["updated_at"],
         }
 
-        return post
+        conn.close()
+        return response
 
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Erro ao buscar post {task_id}: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Erro ao obter post: {str(e)}")
 
 
 @router.post(
     "/list-raw-materials-by-ids",
-    tags=["Automação"],
-    summary="Listar materiais brutos por IDs (conteúdo resumido)",
-    description="Recebe uma lista de IDs e retorna os registros correspondentes da tabela raw_materials, limitando o campo content para melhor performance.",
+    response_model=RawMaterialsListResponse,
+    tags=["Matéria Prima"],
+    summary="Listar materiais brutos por IDs",
+    description="Retorna uma lista de materiais brutos com base nos IDs fornecidos, com conteúdo resumido.",
 )
-async def list_raw_materials_by_ids(request: RawMaterialRequest):
-    """
-    Exemplo de requisição:
-    {
-      "ids": ["56598d6c-1b61-4a4d-9bf5-a2ed74f0ca6e", "253be6c8-8762-41b4-a218-5682434d42f5"]
-    }
-    """
+async def list_raw_materials_by_ids(
+    request: RawMaterialRequest,
+    user: dict = Depends(Auth.verify_token),
+):
     try:
-        if not request.ids:
-            raise HTTPException(status_code=400, detail="Lista de IDs vazia.")
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            raw_materials = db_service.get_raw_materials_by_ids(conn, request.ids)
+            if not raw_materials:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Nenhum material bruto encontrado para os IDs fornecidos.",
+                )
 
-        conn = sqlite3.connect(db_service.DB_FILE)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+            # Limitar conteúdo retornado para performance
+            MAX_CONTENT_LENGTH = 1000
+            response = []
+            for rm in raw_materials:
+                content = rm.get("content", "")
+                summarized_content = (
+                    content[:MAX_CONTENT_LENGTH] + "..."
+                    if len(content) > MAX_CONTENT_LENGTH
+                    else content
+                )
+                response.append(
+                    {
+                        "id": rm.get("id"),
+                        "content": summarized_content,
+                        "url": rm.get("url"),
+                        "task_id": rm.get("task_id"),
+                        "created_at": rm.get("created_at"),
+                        "updated_at": rm.get("updated_at"),
+                    }
+                )
 
-        placeholders = ",".join("?" * len(request.ids))
-        query = f"SELECT * FROM raw_materials WHERE id IN ({placeholders})"
-        cursor.execute(query, request.ids)
-        rows = cursor.fetchall()
-        conn.close()
-
-        if not rows:
-            return []
-
-        MAX_CONTENT_LENGTH = 1000  # 👈 limite de caracteres exibidos
-        result = []
-        for row in rows:
-            content = row["content"] or ""
-            preview = (
-                content[:MAX_CONTENT_LENGTH].rstrip() + "..."
-                if len(content) > MAX_CONTENT_LENGTH
-                else content
-            )
-
-            result.append(
-                {
-                    "id": row["id"],
-                    "user_id": row["user_id"],
-                    "task_id": row["task_id"],
-                    "url": row["url"],
-                    "content": preview,
-                    "created_at": row["created_at"],
-                }
-            )
-
-        return result
-
+            return RawMaterialsListResponse(raw_materials=response)
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Erro ao listar materiais brutos por IDs: {str(e)}")
         raise HTTPException(
-            status_code=500, detail=f"Erro ao buscar materiais por IDs: {str(e)}"
-        )
-
-
-@router.put(
-    "/update-raw-material-content/{id}",
-    tags=["Automação"],
-    summary="Atualizar conteúdo de um material bruto (com histórico)",
-    description="Atualiza o campo 'content' da tabela raw_materials, registrando a versão anterior em raw_materials_history.",
-)
-async def update_raw_material_content(id: str, request: UpdateRawMaterialRequest):
-    """
-    Exemplo de requisição:
-    PUT /api/update-raw-material-content/{id}
-    {
-      "content": "Novo texto atualizado do material bruto.",
-      "user_id": "admin@dailybrief.com"
-    }
-    """
-    try:
-        conn = sqlite3.connect(db_service.DB_FILE)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        # Verifica se o material existe
-        cursor.execute("SELECT * FROM raw_materials WHERE id = ?", (id,))
-        material = cursor.fetchone()
-        if not material:
-            conn.close()
-            raise HTTPException(
-                status_code=404, detail=f"Material com ID {id} não encontrado."
-            )
-
-        old_content = material["content"]
-        user_id = request.user_id or material["user_id"]
-        task_id = material["task_id"]
-
-        # Salva o conteúdo anterior no histórico
-        cursor.execute(
-            """
-            INSERT INTO raw_materials_history (raw_material_id, old_content, updated_at, user_id, task_id)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                id,
-                old_content,
-                datetime.now().isoformat(),
-                user_id,
-                task_id,
-            ),
-        )
-
-        # Atualiza o conteúdo principal e o campo updated_at
-        cursor.execute(
-            """
-            UPDATE raw_materials
-            SET content = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                request.content,
-                datetime.now().isoformat(),
-                id,
-            ),
-        )
-
-        conn.commit()
-        conn.close()
-
-        return {
-            "message": "Conteúdo atualizado com sucesso.",
-            "id": id,
-            "history_saved": True,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Erro ao atualizar conteúdo: {str(e)}"
+            status_code=500, detail=f"Erro ao listar materiais: {str(e)}"
         )

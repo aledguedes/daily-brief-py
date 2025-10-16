@@ -1,9 +1,8 @@
 # src/automation_service.py
 import asyncio
 import logging
-import os
 import time
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import uuid
 from datetime import datetime, timezone
 import json
@@ -15,26 +14,26 @@ from src.scraping import scrape_sources
 from src.content import determine_content_type
 from src.utils import save_report, save_payload_to_file, send_logs_to_backend
 import src.database_service as db_service
-import src.postgresql_service as pg_service
 import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 
 
-# Funções movidas de src/api.py
-def get_existing_posts(user_id: str):
+async def get_existing_posts(user_id: str) -> List[str]:
+    """
+    Obtém os títulos dos posts existentes para evitar duplicatas.
+    """
     try:
-        if Config.USE_POSTGRES:
-            posts = pg_service.get_all_posts(user_id)
-        else:
-            posts = db_service.get_all_posts(user_id)
-        return [post["title"] for post in posts]
+        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+            posts = await db_service.list_user_materials(conn, user_id)
+        return [post.get("theme", "") for post in posts if post.get("theme")]
     except Exception as e:
         logger.error(f"Erro ao buscar posts existentes: {str(e)}")
         return []
 
 
 def send_post(payload: dict):
+    """Envia o post gerado para a API configurada."""
     if Config.POST_API_URL:
         try:
             response = requests.post(
@@ -49,7 +48,8 @@ def send_post(payload: dict):
 
 async def generate_content_with_gemini_service(
     prompt: str, user_id: str, task_id: str, log_payload: bool
-):
+) -> Dict[str, Any]:
+    """Gera conteúdo usando o modelo Gemini."""
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
         generation_config = genai.GenerationConfig(
@@ -69,7 +69,6 @@ async def generate_content_with_gemini_service(
 
         gemini_response = json.loads(content)
         return gemini_response
-
     except json.JSONDecodeError as e:
         error_message = f"Erro ao decodificar JSON da resposta do Gemini: {e}. Resposta bruta: {content}"
         logger.error(error_message, exc_info=True)
@@ -80,78 +79,112 @@ async def generate_content_with_gemini_service(
         raise RuntimeError(error_message)
 
 
-# Funções movidas de src/main.py
 async def process_theme(
-    theme_config,
-    headers,
-    existing_titles,
-    user_id,
-    task_id,
-    output_format,
-    return_raw_material_only=False,
-):
-    """
-    Processa um tema: extrai material bruto e salva em raw_materials (se return_raw_material_only=True)
-    ou delega geração completa para process_material_task.
-    """
+    theme_config: Dict[str, Any],
+    headers: Dict[str, str],
+    existing_titles: List[str],
+    user_id: str,
+    task_id: str,
+    output_format: Optional[str],
+    return_raw_material_only: bool = False,
+) -> List[Dict[str, Any]]:
+    """Processa um tema: extrai material bruto e gera posts."""
     tema = theme_config.get("tema", "Desconhecido")
     content_type = theme_config.get("tipo", output_format)
     post_start_time = time.time()
     posts_for_theme = []
     logger.info(f"Processando tema '{tema}' com tipo de conteúdo: {content_type}")
 
-    raw_material_count = 0
     try:
-        raw_materials = await scrape_sources(theme_config)
-        raw_material_count = len(raw_materials)
-        if not raw_materials:
-            logger.warning(
-                f"Nenhum material bruto encontrado para o tema '{tema}'. Pulando geração de conteúdo."
+        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+            # Atualiza o status para PENDING_COLLECTION
+            status_id = db_service.get_status_id_by_name(
+                "PENDING_COLLECTION", conn=conn
             )
-            return posts_for_theme
+            if not status_id:
+                logger.error("Status PENDING_COLLECTION não encontrado.")
+                raise ValueError("Status PENDING_COLLECTION não encontrado.")
+            db_service.update_material_status(
+                conn, user_id, task_id, "PENDING_COLLECTION"
+            )
 
-        if return_raw_material_only:
-            logger.info(
-                f"Modo 'apenas material bruto' ativado. Salvando {len(raw_materials)} materiais."
+            # Obtém materiais brutos
+            compiled_text, unique_source_urls = await scrape_sources(tema)
+            if not compiled_text or not unique_source_urls:
+                logger.warning(
+                    f"Nenhum material bruto encontrado para o tema '{tema}'. Atualizando status para PENDING_GENERATION."
+                )
+                status_id = db_service.get_status_id_by_name(
+                    "PENDING_GENERATION", conn=conn
+                )
+                if not status_id:
+                    logger.error("Status PENDING_GENERATION não encontrado.")
+                    raise ValueError("Status PENDING_GENERATION não encontrado.")
+                db_service.update_material_status(
+                    conn, user_id, task_id, "PENDING_GENERATION"
+                )
+                return posts_for_theme
+
+            # Salva o material bruto como um único registro
+            raw_material_id = db_service.save_raw_material(
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                url=unique_source_urls[0],  # Usa a primeira URL como representativa
+                content=compiled_text,
             )
-            if Config.USE_POSTGRES:
-                pg_service.save_raw_materials(task_id, user_id, raw_materials)
-            else:
-                db_service.save_raw_materials(task_id, user_id, raw_materials)
+            raw_material_ids = [raw_material_id]
+
+            # Atualiza os raw_material_ids e source_urls na tabela materials
+            db_service.update_material_raw_material_ids(
+                conn=conn,
+                task_id=task_id,
+                raw_material_ids=raw_material_ids,
+            )
+            db_service.save_material(
+                conn=conn,
+                user_id=user_id,
+                automation_request_id=None,
+                task_id=task_id,
+                status_id=status_id,
+                theme=tema,
+                content_type=content_type,
+                source_urls=unique_source_urls,
+            )
+
+            # Atualiza o status para RAW_COLLECTED
+            status_id = db_service.get_status_id_by_name("RAW_COLLECTED", conn=conn)
+            if not status_id:
+                logger.error("Status RAW_COLLECTED não encontrado.")
+                raise ValueError("Status RAW_COLLECTED não encontrado.")
+            db_service.update_material_status(conn, user_id, task_id, "RAW_COLLECTED")
 
             await send_logs_to_backend(
                 {
-                    "action": f"Coleta de {len(raw_materials)} materiais brutos para task_id '{task_id}' concluída.",
+                    "action": f"Coleta de material bruto para task_id '{task_id}' concluída.",
                     "level": "INFO",
                     "report_id": task_id,
                 },
                 headers,
             )
-            return raw_material_count
 
-        if Config.USE_POSTGRES:
-            pg_service.save_raw_materials(task_id, user_id, raw_materials)
-        else:
-            db_service.save_raw_materials(task_id, user_id, raw_materials)
+            if return_raw_material_only:
+                logger.info(f"Modo 'apenas material bruto' ativado para tema '{tema}'.")
+                return [raw_material_id]
 
-        logger.info(
-            f"Material bruto salvo. Gerando conteúdo com Gemini para {len(raw_materials)} itens."
-        )
+            logger.info(f"Gerando conteúdo com Gemini para tema '{tema}'.")
 
-        for material in raw_materials:
-            title_parts = material.get("title", "").split(" - ")
-            source_title = title_parts[-1] if len(title_parts) > 1 else "Unknown"
-            title = title_parts[0] if title_parts else "No Title"
-
+            # Gera o post a partir do material bruto
+            title = f"{tema} - Aggregated Content"
             if title in existing_titles:
                 logger.info(f"Título '{title}' já existe no banco de dados. Pulando...")
-                continue
+                return posts_for_theme
 
             try:
                 post_payload = {
                     "request_type": content_type,
-                    "material_bruto": material["content"],
-                    "url_fonte": material.get("url"),
+                    "material_bruto": compiled_text,
+                    "url_fonte": unique_source_urls[0] if unique_source_urls else "",
                     "tema": tema,
                     "user_id": user_id,
                     "task_id": task_id,
@@ -178,17 +211,16 @@ async def process_theme(
                     "title": post_title,
                     "summary": post_summary,
                     "content": content_final,
-                    "url_fonte": material.get("url"),
-                    "data_publicacao": datetime.now(timezone.utc),
+                    "url_fonte": unique_source_urls[0] if unique_source_urls else "",
+                    "data_publicacao": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
                     "task_id": task_id,
                     "user_id": user_id,
                     "tema": tema,
                 }
 
-                if Config.USE_POSTGRES:
-                    pg_service.save_post(post_db_payload)
-                else:
-                    db_service.save_post(post_db_payload)
+                db_service.save_post(post_db_payload)
 
                 if Config.POST_API_URL:
                     post_api_payload = {
@@ -196,40 +228,53 @@ async def process_theme(
                         "post_content": content_final,
                     }
                     send_post(post_api_payload)
+                    status_name = "PUBLISHED"
+                else:
+                    status_name = "GENERATED"
+
+                # Atualiza o status para GENERATED ou PUBLISHED
+                status_id = db_service.get_status_id_by_name(status_name, conn=conn)
+                if not status_id:
+                    logger.error(f"Status {status_name} não encontrado.")
+                    raise ValueError(f"Status {status_name} não encontrado.")
+                db_service.update_material_status(conn, user_id, task_id, status_name)
 
                 posts_for_theme.append(post_db_payload)
                 logger.info(f"Post '{post_title}' gerado e salvo.")
 
             except (ValueError, RuntimeError) as e:
                 logger.error(
-                    f"Erro ao processar material '{title}': {str(e)}", exc_info=True
+                    f"Erro ao gerar conteúdo para tema '{tema}': {str(e)}",
+                    exc_info=True,
                 )
                 await send_logs_to_backend(
                     {
-                        "action": f"Falha na geração de conteúdo para URL {material.get('url')}. Erro: {str(e)}",
+                        "action": f"Falha na geração de conteúdo para tema '{tema}'. Erro: {str(e)}",
                         "level": "ERROR",
                         "report_id": task_id,
                     },
                     headers,
                 )
-                continue
-            except Exception as e:
-                logger.error(
-                    f"Erro inesperado ao processar material '{title}': {str(e)}",
-                    exc_info=True,
+                status_id = db_service.get_status_id_by_name(
+                    "FAILED_GENERATION", conn=conn
                 )
-                await send_logs_to_backend(
-                    {
-                        "action": f"Falha inesperada ao processar material para URL {material.get('url')}. Erro: {str(e)}",
-                        "level": "CRITICAL",
-                        "report_id": task_id,
-                    },
-                    headers,
+                if not status_id:
+                    logger.error("Status FAILED_GENERATION não encontrado.")
+                    raise ValueError("Status FAILED_GENERATION não encontrado.")
+                db_service.update_material_status(
+                    conn, user_id, task_id, "FAILED_GENERATION"
                 )
-                continue
 
     except Exception as e:
         logger.error(f"Erro ao processar o tema '{tema}': {str(e)}", exc_info=True)
+        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
+            if not status_id:
+                logger.error("Status FAILED_GENERATION não encontrado.")
+                raise ValueError("Status FAILED_GENERATION não encontrado.")
+            db_service.update_material_status(
+                conn, user_id, task_id, "FAILED_GENERATION"
+            )
         await send_logs_to_backend(
             {
                 "action": f"Falha na automação para o tema '{tema}'. Erro: {str(e)}",
@@ -243,16 +288,14 @@ async def process_theme(
 
 
 async def run_automation(
-    output_format=None,
-    theme=None,
-    auth_headers=None,
+    output_format: Optional[str] = None,
+    theme: Optional[str] = None,
+    auth_headers: Optional[Dict[str, str]] = None,
     user_id: str = "anonymous",
     task_id: Optional[str] = None,
     return_raw_material_only: bool = False,
-):
-    """
-    Função principal da automação: orquestra a busca, salvamento de materiais brutos e geração de posts.
-    """
+) -> Dict[str, Any]:
+    """Função principal da automação: orquestra a busca, salvamento de materiais brutos e geração de posts."""
     start_time = time.time()
     task_id = task_id or str(uuid.uuid4())
     logger.info(
@@ -287,6 +330,26 @@ async def run_automation(
 
         if not themes:
             logger.error(f"Nenhum tema encontrado para o termo de pesquisa '{theme}'.")
+            async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+                status_id = db_service.get_status_id_by_name(
+                    "FAILED_GENERATION", conn=conn
+                )
+                if not status_id:
+                    logger.error("Status FAILED_GENERATION não encontrado.")
+                    raise ValueError("Status FAILED_GENERATION não encontrado.")
+                db_service.save_material(
+                    conn=conn,
+                    user_id=user_id,
+                    automation_request_id=None,
+                    task_id=task_id,
+                    status_id=status_id,
+                    theme=theme,
+                    content_type=output_format,
+                )
+                status = db_service.get_status_by_id(status_id, conn=conn)
+                if not status:
+                    logger.error(f"Status ID {status_id} não encontrado.")
+                    raise ValueError(f"Status ID {status_id} não encontrado.")
             await send_logs_to_backend(
                 {
                     "action": f"Nenhum tema encontrado para o termo de pesquisa '{theme}'.",
@@ -297,9 +360,24 @@ async def run_automation(
             )
             return {
                 "task_id": task_id,
-                "status": "FAILED",
+                "status": status,
                 "message": "Nenhum tema encontrado.",
             }
+
+        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("PENDING", conn=conn)
+            if not status_id:
+                logger.error("Status PENDING não encontrado.")
+                raise ValueError("Status PENDING não encontrado.")
+            db_service.save_material(
+                conn=conn,
+                user_id=user_id,
+                automation_request_id=None,
+                task_id=task_id,
+                status_id=status_id,
+                theme=theme,
+                content_type=output_format,
+            )
 
         for theme_config in themes:
             await process_theme(
@@ -318,13 +396,37 @@ async def run_automation(
             logger.info(
                 f"Coleta de material bruto para task_id: '{task_id}' finalizada em {duration:.2f} segundos."
             )
-            return {"task_id": task_id, "status": "COLLECTION_COMPLETED"}
+            async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+                status_id = db_service.get_status_id_by_name("RAW_COLLECTED", conn=conn)
+                if not status_id:
+                    logger.error("Status RAW_COLLECTED não encontrado.")
+                    raise ValueError("Status RAW_COLLECTED não encontrado.")
+                db_service.update_material_status(
+                    conn, user_id, task_id, "RAW_COLLECTED"
+                )
+                status = db_service.get_status_by_id(status_id, conn=conn)
+                if not status:
+                    logger.error(f"Status ID {status_id} não encontrado.")
+                    raise ValueError(f"Status ID {status_id} não encontrado.")
+            return {"task_id": task_id, "status": status}
 
         end_time = time.time()
         duration = end_time - start_time
         logger.info(
             f"Execução completa da automação para task_id: '{task_id}' finalizada em {duration:.2f} segundos."
         )
+
+        final_status_name = "PUBLISHED" if Config.POST_API_URL else "GENERATED"
+        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name(final_status_name, conn=conn)
+            if not status_id:
+                logger.error(f"Status {final_status_name} não encontrado.")
+                raise ValueError(f"Status {final_status_name} não encontrado.")
+            db_service.update_material_status(conn, user_id, task_id, final_status_name)
+            status = db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                logger.error(f"Status ID {status_id} não encontrado.")
+                raise ValueError(f"Status ID {status_id} não encontrado.")
 
         if Config.LOGS_API_URL:
             await send_logs_to_backend(
@@ -336,14 +438,32 @@ async def run_automation(
                 auth_headers,
             )
 
-        save_report(task_id, user_id)
-        return {"task_id": task_id, "status": "COMPLETED"}
+        await save_report(task_id, user_id)
+        return {"task_id": task_id, "status": status}
 
     except Exception as e:
         logger.error(
             f"Erro fatal na função run_automation para task_id '{task_id}': {str(e)}",
             exc_info=True,
         )
+        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
+            if not status_id:
+                logger.error("Status FAILED_GENERATION não encontrado.")
+                raise ValueError("Status FAILED_GENERATION não encontrado.")
+            db_service.save_material(
+                conn=conn,
+                user_id=user_id,
+                automation_request_id=None,
+                task_id=task_id,
+                status_id=status_id,
+                theme=theme,
+                content_type=output_format,
+            )
+            status = db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                logger.error(f"Status ID {status_id} não encontrado.")
+                raise ValueError(f"Status ID {status_id} não encontrado.")
         if Config.LOGS_API_URL:
             await send_logs_to_backend(
                 {
@@ -353,7 +473,7 @@ async def run_automation(
                 },
                 auth_headers,
             )
-        return {"task_id": task_id, "status": "FAILED", "message": str(e)}
+        return {"task_id": task_id, "status": status, "message": str(e)}
 
 
 async def process_material_task(
@@ -361,9 +481,7 @@ async def process_material_task(
     automation_request_id: Optional[str],
     task_id: str,
 ):
-    """
-    Processa o material bruto e gera o conteúdo final.
-    """
+    """Processa o material bruto e gera o conteúdo final."""
     try:
         db_user_id = user["id"]
         headers = {"Authorization": f"Bearer {user['token']}"}
@@ -371,34 +489,35 @@ async def process_material_task(
             f"Processando task de material bruto para user_id: {db_user_id}, task_id: {task_id}"
         )
 
-        raw_materials = (
-            pg_service.get_raw_materials_by_task_id(task_id)
-            if Config.USE_POSTGRES
-            else db_service.get_raw_materials_by_task_id(task_id)
-        )
+        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+            raw_materials = db_service.get_raw_materials_by_task_id(task_id, conn=conn)
+            if not raw_materials:
+                logger.warning(
+                    f"Nenhum material bruto encontrado para a task_id: {task_id}. Atualizando status para FAILED_GENERATION."
+                )
+                status_id = db_service.get_status_id_by_name(
+                    "FAILED_GENERATION", conn=conn
+                )
+                if not status_id:
+                    logger.error("Status FAILED_GENERATION não encontrado.")
+                    raise ValueError("Status FAILED_GENERATION não encontrado.")
+                db_service.update_material_status(
+                    conn, db_user_id, task_id, "FAILED_GENERATION"
+                )
+                return
 
-        if not raw_materials:
-            logger.warning(
-                f"Nenhum material bruto encontrado para a task_id: {task_id}. Pulando geração de conteúdo."
-            )
-            return
-
-        existing_titles = get_existing_posts(db_user_id)
-
-        for material in raw_materials:
-            title_parts = material.get("title", "").split(" - ")
-            title = title_parts[0] if title_parts else "No Title"
-
+            material = raw_materials[0]  # Assume um único material bruto
+            existing_titles = get_existing_posts(db_user_id)
+            title = f"{material.get('theme', 'Desconhecido')} - Aggregated Content"
             if title in existing_titles:
                 logger.info(f"Título '{title}' já existe no banco de dados. Pulando...")
-                continue
+                return
 
             try:
-                # O payload do Gemini é construído aqui com base no material bruto
                 post_payload = {
-                    "request_type": "article",  # Assume 'article' se não especificado
+                    "request_type": "article",
                     "material_bruto": material["content"],
-                    "url_fonte": material.get("url"),
+                    "url_fonte": material.get("url", ""),
                     "tema": material.get("theme", "Desconhecido"),
                     "user_id": db_user_id,
                     "task_id": task_id,
@@ -425,17 +544,16 @@ async def process_material_task(
                     "title": post_title,
                     "summary": post_summary,
                     "content": content_final,
-                    "url_fonte": material.get("url"),
-                    "data_publicacao": datetime.now(timezone.utc),
+                    "url_fonte": material.get("url", ""),
+                    "data_publicacao": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
                     "task_id": task_id,
                     "user_id": db_user_id,
                     "tema": material.get("theme", "Desconhecido"),
                 }
 
-                if Config.USE_POSTGRES:
-                    pg_service.save_post(post_db_payload)
-                else:
-                    db_service.save_post(post_db_payload)
+                db_service.save_post(post_db_payload)
 
                 if Config.POST_API_URL:
                     post_api_payload = {
@@ -443,6 +561,17 @@ async def process_material_task(
                         "post_content": content_final,
                     }
                     send_post(post_api_payload)
+                    current_status = "PUBLISHED"
+                else:
+                    current_status = "GENERATED"
+
+                status_id = db_service.get_status_id_by_name(current_status, conn=conn)
+                if not status_id:
+                    logger.error(f"Status {current_status} não encontrado.")
+                    raise ValueError(f"Status {current_status} não encontrado.")
+                db_service.update_material_status(
+                    conn, db_user_id, task_id, current_status
+                )
 
                 logger.info(
                     f"Post '{post_title}' gerado e salvo para task_id '{task_id}'."
@@ -453,7 +582,16 @@ async def process_material_task(
                     f"Erro ao gerar conteúdo para task_id '{task_id}': {str(e)}",
                     exc_info=True,
                 )
-                send_logs_to_backend(
+                status_id = db_service.get_status_id_by_name(
+                    "FAILED_GENERATION", conn=conn
+                )
+                if not status_id:
+                    logger.error("Status FAILED_GENERATION não encontrado.")
+                    raise ValueError("Status FAILED_GENERATION não encontrado.")
+                db_service.update_material_status(
+                    conn, db_user_id, task_id, "FAILED_GENERATION"
+                )
+                await send_logs_to_backend(
                     {
                         "action": f"Falha na geração de conteúdo para task '{task_id}'. Erro: {str(e)}",
                         "level": "ERROR",
@@ -461,13 +599,21 @@ async def process_material_task(
                     },
                     headers,
                 )
-                continue
+
     except Exception as e:
         logger.error(
             f"Erro inesperado no processamento da task '{task_id}': {str(e)}",
             exc_info=True,
         )
-        send_logs_to_backend(
+        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
+            if not status_id:
+                logger.error("Status FAILED_GENERATION não encontrado.")
+                raise ValueError("Status FAILED_GENERATION não encontrado.")
+            db_service.update_material_status(
+                conn, db_user_id, task_id, "FAILED_GENERATION"
+            )
+        await send_logs_to_backend(
             {
                 "action": f"Erro inesperado no processamento da task '{task_id}'. Erro: {str(e)}",
                 "level": "CRITICAL",
