@@ -79,6 +79,38 @@ async def generate_content_with_gemini_service(
         raise RuntimeError(error_message)
 
 
+async def scrape_sources_with_factors(
+    search_factors: str, theme: str
+) -> List[Dict[str, str]]:
+    """
+    Simula a execução de web scraping avançado usando os fatores de busca.
+    Esta função deve ser implementada para usar os search_factors
+    (deserializados de JSON) para realizar buscas mais refinadas.
+    """
+    logger.info(
+        f"Executando scraping avançado. Tema: {theme}, Fatores: {search_factors[:50]}..."
+    )
+
+    # Lógica para deserializar e usar os fatores...
+    try:
+        factors = json.loads(search_factors)
+        # Ex: buscar no Reddit pelos factors['keywords']
+    except json.JSONDecodeError:
+        logger.error("Erro ao deserializar search_factors.")
+
+    # Retorna uma lista de materiais brutos individuais (Estrutura idêntica à de rotas de URL)
+    return [
+        {
+            "url": "https://reddit.com/post/123",
+            "content": f"Conteúdo do post 1 sobre {theme} (coletado com fatores)",
+        },
+        {
+            "url": "https://google.com/snippet/456",
+            "content": f"Snippet de busca 2 sobre {theme} (coletado com fatores)",
+        },
+    ]
+
+
 async def process_theme(
     theme_config: Dict[str, Any],
     headers: Dict[str, str],
@@ -287,6 +319,101 @@ async def process_theme(
     return posts_for_theme
 
 
+async def process_intelligent_collection(
+    task_id: str,
+    user_id: str,
+    theme: str,
+    content_type: str,
+    search_factors: str,
+    auth_headers: Dict[str, str],
+) -> Dict[str, Any]:
+    """
+    Processa a coleta de material bruto utilizando os search_factors inteligentes.
+    Reutiliza a lógica de salvamento de material bruto por URL.
+    """
+    logger.info(f"Task {task_id}: Iniciando coleta inteligente com search_factors.")
+
+    try:
+        # 1. Executa a Coleta Inteligente (usando a nova função)
+        collected_materials = await scrape_sources_with_factors(search_factors, theme)
+
+        if not collected_materials:
+            logger.warning(
+                f"Nenhum material bruto encontrado com fatores de busca para tema '{theme}'."
+            )
+            async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+                db_service.update_material_status(
+                    conn, user_id, task_id, "FAILED_GENERATION"
+                )
+            return {
+                "task_id": task_id,
+                "status": "NO_RAW_MATERIAL",
+                "message": "Nenhum material bruto encontrado.",
+            }
+
+        raw_material_ids = []
+        source_urls = []
+
+        # 2. Persistência Unificada (Reutilização de Lógica de URL)
+        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+            for material in collected_materials:
+                # REUTILIZAÇÃO da função save_raw_material (existente e usada por rotas de URL)
+                raw_id = db_service.save_raw_material(
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    url=material["url"],
+                    content=material["content"],
+                )
+                raw_material_ids.append(raw_id)
+                source_urls.append(material["url"])
+
+            # 3. Atualiza a tabela 'materials' com os IDs e URLs coletados
+            db_service.update_material_raw_material_ids(  # Função implícita no DB Service
+                conn=conn,
+                task_id=task_id,
+                raw_material_ids=raw_material_ids,
+            )
+
+            # Atualiza o status e metadados na tabela 'materials'
+            db_service.save_material(  # Reutiliza save_material para atualizar metadados (source_urls, status, etc.)
+                conn=conn,
+                user_id=user_id,
+                automation_request_id=None,
+                task_id=task_id,
+                status_id=db_service.get_status_id_by_name("RAW_COLLECTED", conn=conn),
+                theme=theme,
+                content_type=content_type,
+                source_urls=source_urls,
+            )
+
+        await send_logs_to_backend(
+            {
+                "action": f"Coleta inteligente concluída. {len(raw_material_ids)} materiais brutos salvos.",
+                "level": "INFO",
+                "report_id": task_id,
+            },
+            auth_headers,
+        )
+
+        return {
+            "task_id": task_id,
+            "status": "RAW_COLLECTED",
+            "message": "Coleta inteligente concluída.",
+        }
+
+    except Exception as e:
+        logger.error(
+            f"Erro na coleta inteligente para task_id {task_id}: {str(e)}",
+            exc_info=True,
+        )
+        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+            db_service.update_material_status(
+                conn, user_id, task_id, "COLLECTION_FAILED"  # Atualizar status
+            )
+        raise
+
+
 async def run_automation(
     output_format: Optional[str] = None,
     theme: Optional[str] = None,
@@ -294,6 +421,7 @@ async def run_automation(
     user_id: str = "anonymous",
     task_id: Optional[str] = None,
     return_raw_material_only: bool = False,
+    search_factors: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Função principal da automação: orquestra a busca, salvamento de materiais brutos e geração de posts."""
     start_time = time.time()
@@ -415,6 +543,19 @@ async def run_automation(
         logger.info(
             f"Execução completa da automação para task_id: '{task_id}' finalizada em {duration:.2f} segundos."
         )
+
+        if search_factors and return_raw_material_only:
+            logger.info(
+                f"Modo 'Intelligent Collection' ativado para task_id: {task_id}."
+            )
+            return await process_intelligent_collection(
+                task_id=task_id,
+                user_id=user_id,
+                theme=theme,
+                content_type=output_format,  # content_type foi passado como output_format do trigger-by-text
+                search_factors=search_factors,
+                auth_headers=auth_headers,
+            )
 
         final_status_name = "PUBLISHED" if Config.POST_API_URL else "GENERATED"
         async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:

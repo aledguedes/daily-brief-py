@@ -22,9 +22,17 @@ import os
 from src.config import Config
 from src.auth import Auth
 import src.database_service as db_service
-from src.database_service import AsyncDatabaseManager, DB_FILE, get_db_connection
+from src.database_service import (
+    AsyncDatabaseManager,
+    DB_FILE,
+    get_db_connection,
+    save_automation_config,
+    get_status_id_by_name,
+    save_material,
+)
+
 from src.scraping_service import (
-    fetch_url_content,
+    fetch_url_content, 
     clean_html_content,
     save_selector_data,
     extract_content_by_selectors,
@@ -40,6 +48,21 @@ from src.schemas import RESPONSE_SCHEMA_V1
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+AI_RESPONSE_SCHEMA_CONFIG = {
+    "type": "object",
+    "properties": {
+        "theme": {
+            "type": "string",
+            "description": "O tema central e conciso do textContent.",
+        },
+        "search_factors": {
+            "type": "string",
+            "description": 'Objeto JSON serializado com os termos e configurações de busca refinados (ex: \'{"keywords": ["termo1", "termo2"]}\')',
+        },
+    },
+    "required": ["theme", "search_factors"],
+}
 
 
 class RawContentResponse(BaseModel):
@@ -188,6 +211,27 @@ class RawMaterialRequest(BaseModel):
 class UpdateRawMaterialRequest(BaseModel):
     content: str
     user_id: str
+
+
+class TriggerByTextRequest(BaseModel):
+    textContent: str = Field(
+        ...,
+        max_length=10000,
+        description="Material bruto para análise (máx. 10.000 caracteres).",
+    )
+    content_type: str = Field(
+        ..., description="O tipo de conteúdo que será gerado (ex: 'article', 'tweet')."
+    )
+    provider: str = Field("openai", description="O provedor de IA a ser usado.")
+
+
+class TriggerByTextResponse(BaseModel):
+    task_id: str
+    theme: str
+    status: str
+    message: str = (
+        "Configuração de busca gerada e tarefa iniciada. Use o task_id para monitorar e acionar a coleta."
+    )
 
 
 @retry(
@@ -1264,83 +1308,76 @@ THEME_SCHEMA = {
     status_code=200,
 )
 async def trigger_by_text(
-    payload: ContentInput, conn: sqlite3.Connection = Depends(get_db_connection)
+    request: TriggerByTextRequest,
+    current_user: dict = Depends(Auth.verify_token),
 ):
     """
-    Recebe um texto de matéria, extrai um tema com o provedor de IA,
-    salva o material bruto no SQLite e os metadados no PostgreSQL.
+    Recebe um texto, utiliza IA para extrair tema e fatores de busca aprimorados,
+    e salva a configuração no DB para acionamento posterior via /trigger-by-id.
     """
-    logger.info("Nova requisição recebida na rota /api/trigger-by-text")
-    provider_name = payload.provider
+    user_id = current_user.get("sub")
+    task_id = str(uuid.uuid4())
+    provider_name = request.provider
 
+    # 1. Extração de Tema e Fatores de Busca
     try:
-        logger.info(f"Extraindo tema com o provedor: {provider_name}")
         provider = get_provider_instance(provider_name)
-        prompt = (
-            "A partir do seguinte texto, identifique um único tema principal ou título. "
-            "Sua resposta DEVE estar estritamente no formato JSON fornecido. "
-            "Texto: " + payload.text_content[:2000]
-        )
+        MAX_AI_INPUT_CHARS = 10000 
+        
+        prompt = f"Analise o seguinte texto: '{request.textContent[:MAX_AI_INPUT_CHARS]}'. Com base nele, extraia o tema central e gere um objeto JSON serializado de fatores de busca refinados (keywords, fontes, etc.) para coletar material bruto relevante."
 
-        ai_response = await provider.generate_content(
-            prompt=prompt, response_schema=THEME_SCHEMA
-        )
-        ai_theme = (
-            ai_response.get("theme", "Tema Desconhecido").strip().replace('"', "")
-        )
-        logger.info(f"Tema extraído pela IA: '{ai_theme}'")
+        ai_response: Dict[str, Any] = await provider.generate_content(
+        prompt=prompt,
+        response_schema=AI_RESPONSE_SCHEMA_CONFIG,  
+    )
 
-        raw_material_id = str(uuid.uuid4())
-        db_service.save_raw_material(
-            conn=conn,
-            user_id=payload.user_id,
-            task_id=str(uuid.uuid4()),
-            url=None,
-            content=payload.text_content,
-            raw_material_id=raw_material_id,
-        )
-        logger.info(f"Material bruto salvo no SQLite com ID: {raw_material_id}")
+        theme = ai_response.get("theme")
+        search_factors = ai_response.get("search_factors")
+        
+        if not theme or not search_factors:
+             raise ValueError("A IA não retornou o tema e/ou os fatores de busca esperados.")
 
-        task_id = str(uuid.uuid4())
-        status_id = db_service.get_status_id_by_name("RAW_COLLECTED", conn=conn)
-        if not status_id:
-            raise HTTPException(
-                status_code=500, detail="Status RAW_COLLECTED não encontrado."
-            )
-
-        db_service.save_material(
-            conn=conn,
-            user_id=payload.user_id,
-            automation_request_id=None,
-            task_id=task_id,
-            status_id=status_id,
-            theme=ai_theme,
-            content_type=payload.content_type,
-            raw_material=payload.text_content,
-            raw_material_ids=[raw_material_id],
-        )
-
-        status = db_service.get_status_by_id(status_id, conn=conn)
-        if not status:
-            raise HTTPException(
-                status_code=500, detail=f"Status ID {status_id} não encontrado."
-            )
-        return {
-            "message": "Tema gerado e dados salvos. Use o task_id para iniciar a automação.",
-            "task_id": task_id,
-            "theme": ai_theme,
-            "automation_request_id": None,
-            "status": status,
-        }
-
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Erro na automação por texto: {str(e)}", exc_info=True)
+        logger.error(f"Erro na extração de tema/fatores de busca: {str(e)}")
         raise HTTPException(
-            status_code=500, detail=f"Erro interno no servidor: {str(e)}"
+            status_code=500, detail=f"Falha na análise de IA: {str(e)}"
         )
 
+    # 2. Persistência no DB
+    try:
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            # Status: PENDING_COLLECTION (Aguardando Coleta via trigger-by-id)
+            status_id = db_service.get_status_id_by_name("PENDING_COLLECTION", conn)
+
+            # 2a. Criação do Registro Principal (Tabela materials)
+            db_service.save_material(
+                conn=conn,
+                user_id=user_id,
+                automation_request_id=None,
+                task_id=task_id,
+                status_id=status_id,
+                theme=theme,
+                content_type=request.content_type,
+            )
+
+            # 2b. Salva a Configuração de Busca (Tabela automation_configs - NOVO PASSO)
+            db_service.save_automation_config(
+                conn=conn,
+                task_id=task_id,
+                search_factors=search_factors,
+            )
+
+        return TriggerByTextResponse(
+            task_id=task_id,
+            theme=theme,
+            status="PENDING_COLLECTION",
+        )
+
+    except Exception as e:
+        logger.error(f"Erro ao salvar tarefa no DB para task_id {task_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Falha ao persistir a tarefa: {str(e)}"
+        )
 
 @router.post(
     "/trigger",
@@ -1492,130 +1529,68 @@ async def trigger_automation_post(
     description="Inicia a coleta de material bruto em segundo plano com base em um ID de requisição existente.",
 )
 async def trigger_by_id(
-    id: int,
+    id: str,
     background_tasks: BackgroundTasks,
-    user_payload: dict = Depends(Auth.verify_token),
-    db: Session = Depends(get_db),
+    current_user: dict = Depends(Auth.verify_token),
 ):
-    logger.info(
-        f"Endpoint /trigger-by-id/{id} acionado por {user_payload.get('sub', 'Desconhecido')}."
-    )
-    user_id = user_payload.get("sub", "anonymous_user")
-    task_id = str(uuid.uuid4())
+    """
+    Aciona a automação de coleta de material bruto em segundo plano,
+    usando o ID da tarefa que contém os fatores de busca inteligentes.
+    """
+    user_id = current_user.get("sub")
+    task_id = id 
 
     try:
-        request_entry = (
-            db.query(AutomationRequest).filter(AutomationRequest.id == id).first()
-        )
-        if not request_entry:
-            logger.warning(f"Registro com ID {id} não encontrado.")
-            if Config.LOGS_API_URL:
-                log_data = {
-                    "action": f"Falha ao executar automação para ID {id}: Registro não encontrado.",
-                    "timestamp": datetime.now(timezone.utc)
-                    .isoformat()
-                    .replace("+00:00", ""),
-                    "level": "WARNING",
-                    "report_id": task_id,
-                }
-                send_logs_to_backend(log_data)
-            raise HTTPException(
-                status_code=404, detail=f"Registro com ID {id} não encontrado"
-            )
-
-        output_format = request_entry.output_format
-        theme = request_entry.theme
-        logger.info(
-            f"Parâmetros do DB: output_format='{output_format}', theme='{theme}'"
-        )
-
         async with AsyncDatabaseManager(DB_FILE) as conn:
-            status_id = db_service.get_status_id_by_name(
-                "PENDING_COLLECTION", conn=conn
-            )
-            if not status_id:
+            # 1. Busca os dados principais da tarefa
+            material_data = db_service.get_material_by_task_id(conn, task_id)
+            if not material_data:
                 raise HTTPException(
-                    status_code=500, detail="Status PENDING_COLLECTION não encontrado."
+                    status_code=404, detail=f"Tarefa com ID '{task_id}' não encontrada."
                 )
 
-            db_service.save_material(
-                user_id=user_id,
-                automation_request_id=id,
-                task_id=task_id,
-                status_id=status_id,
-                theme=theme,
-                content_type=output_format,
-                conn=conn,
-            )
-            logger.info(f"Tarefa '{task_id}' salva para coleta.")
+            # 2. Busca a configuração de busca inteligente (search_factors)
+            config_data = db_service.get_automation_config(conn, task_id)
+            if not config_data or not config_data.get("search_factors"):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Fatores de busca (search_factors) não configurados para o ID '{task_id}'.",
+                )
 
+            # Extração dos parâmetros
+            theme = material_data.get("theme")
+            content_type = material_data.get("content_type")
+            search_factors = config_data.get("search_factors") # String JSON
+
+            # 3. Aciona a coleta em segundo plano (com o novo parâmetro)
             background_tasks.add_task(
                 run_automation,
-                output_format=output_format,
-                theme=theme,
-                auth_headers={"Authorization": f"Bearer {user_payload.get('token')}"},
+                task_id=task_id,
                 user_id=user_id,
-                task_id=task_id,
+                theme=theme,
+                content_type=content_type,
+                search_factors=search_factors,
                 return_raw_material_only=True,
+                auth_headers={"Authorization": f"Bearer {current_user.get('token')}"}
             )
 
-            status = db_service.get_status_by_id(status_id, conn=conn)
-            if not status:
-                raise HTTPException(
-                    status_code=500, detail=f"Status ID {status_id} não encontrado."
-                )
-            return TriggerResponse(
-                trigger_id=str(id),
-                message="Coleta de material iniciada em segundo plano.",
-                task_id=task_id,
-                status=status,
-            )
-
-    except HTTPException as http_exc:
-        logger.error(f"Erro HTTP para ID {id}: {http_exc.detail}")
-        if Config.LOGS_API_URL:
-            log_data = {
-                "action": f"Falha na automação para ID {id}. Erro: {http_exc.detail}",
-                "timestamp": datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", ""),
-                "level": "ERROR",
-                "report_id": task_id,
-            }
-            send_logs_to_backend(log_data)
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
-            if not status_id:
-                raise HTTPException(
-                    status_code=500, detail="Status FAILED_GENERATION não encontrado."
-                )
-            db_service.update_material_status(
-                user_id, task_id, "FAILED_GENERATION", conn=conn
-            )
+        return JSONResponse(
+            status_code=202,  # Accepted
+            content={
+                "task_id": task_id,
+                "status": "COLLECTION_INITIATED",
+                "message": "Coleta de material bruto iniciada em segundo plano. Use o task_id para monitorar o status.",
+            },
+        )
+    except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Erro inesperado para ID {id}: {str(e)}")
-        if Config.LOGS_API_URL:
-            log_data = {
-                "action": f"Erro inesperado na automação para ID {id}. Erro: {str(e)}",
-                "timestamp": datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", ""),
-                "level": "CRITICAL",
-                "report_id": task_id,
-            }
-            send_logs_to_backend(log_data)
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
-            if not status_id:
-                raise HTTPException(
-                    status_code=500, detail="Status FAILED_GENERATION não encontrado."
-                )
-            db_service.update_material_status(
-                user_id, task_id, "FAILED_GENERATION", conn=conn
-            )
-        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
-
+        logger.error(
+            f"Erro ao acionar automação para task_id {task_id}: {str(e)}"
+        )
+        raise HTTPException(
+            status_code=500, detail=f"Erro interno ao acionar a automação: {str(e)}"
+        )
 
 @router.get(
     "/posts",

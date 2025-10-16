@@ -252,6 +252,17 @@ def init_db():
                 """
             )
 
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS automation_configs (
+                    task_id TEXT PRIMARY KEY,
+                    search_factors TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (task_id) REFERENCES materials(task_id) ON DELETE CASCADE
+                );
+                    """
+            )
+
             # Popula a tabela status
             seed_initial_status(conn)
             get_status_id_by_name("PENDING", conn)
@@ -285,6 +296,31 @@ def save_raw_material(
         return raw_material_id
     except Exception as e:
         logger.error(f"Erro ao salvar material bruto para task_id {task_id}: {str(e)}")
+        raise
+
+
+def save_automation_config(
+    conn: sqlite3.Connection,
+    task_id: str,
+    search_factors: str,
+) -> None:
+    """Salva a configuração de busca gerada pela IA na tabela automation_configs."""
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "")
+    try:
+        cursor = conn.cursor()
+        # Usar INSERT OR REPLACE para garantir que a config seja sempre atualizada/criada (idempotência)
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO automation_configs (task_id, search_factors, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (task_id, search_factors, now),
+        )
+        logger.info(
+            f"Configuração de automação salva/atualizada para task_id: {task_id}"
+        )
+    except Exception as e:
+        logger.error(f"Erro ao salvar configuração para task_id {task_id}: {str(e)}")
         raise
 
 
@@ -509,6 +545,30 @@ def get_material_by_task_id(
         return None
     except Exception as e:
         logger.error(f"Erro ao buscar material pelo task_id {task_id}: {str(e)}")
+        return None
+
+
+def get_automation_config(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[Dict[str, Any]]:
+    """Busca a configuração de busca aprimorada a partir do task_id."""
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT search_factors FROM automation_configs WHERE task_id = ?
+            """,
+            (task_id,),
+        )
+        config_data = cursor.fetchone()
+        if config_data:
+            # Retorna o dicionário com o campo search_factors
+            return dict(config_data)
+        return None
+    except Exception as e:
+        logger.error(
+            f"Erro ao buscar configuração de automação para task_id {task_id}: {str(e)}"
+        )
         return None
 
 

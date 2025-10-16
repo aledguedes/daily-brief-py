@@ -45,7 +45,7 @@ class Config:
     DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 
     # Configurações do Gemini
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     MAX_TEXT_LEN = int(os.getenv("MAX_TEXT_LEN", 30000))
 
     # Outras Configurações
