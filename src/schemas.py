@@ -1,6 +1,8 @@
 # src/schemas.py
+from pydantic import BaseModel, HttpUrl, Field
+from typing import List, Optional, Dict, Any, Union
 
-# Esquema de resposta JSON para conteúdo multilíngue
+
 RESPONSE_SCHEMA_V1 = {
     "type": "object",
     "properties": {
@@ -22,9 +24,7 @@ RESPONSE_SCHEMA_V1 = {
             },
             "required": ["PT", "EN", "ES"],
         },
-        # ... (restante da estrutura do excerpt, content, metaDescription) ...
-        # ... (Copie o restante do schema JSON do seu arquivo original aqui) ...
-        "content": {  # Finalizando o JSON...
+        "content": {
             "type": "object",
             "properties": {
                 "PT": {"type": "string"},
@@ -45,3 +45,16 @@ RESPONSE_SCHEMA_V1 = {
     },
     "required": ["title", "excerpt", "content", "metaDescription"],
 }
+
+
+class UrlStatus(BaseModel):
+    """Modelo para logar o status de uma URL após a coleta."""
+
+    url: str
+    status: str
+    raw_material_id: Optional[str] = None
+
+
+class AutomationConfigData(BaseModel):
+    search_factors: Dict[str, Any]
+    collected_urls_log: List[UrlStatus] = Field(default_factory=list)

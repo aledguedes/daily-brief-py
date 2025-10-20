@@ -32,7 +32,7 @@ from src.database_service import (
 )
 
 from src.scraping_service import (
-    fetch_url_content, 
+    fetch_url_content,
     clean_html_content,
     save_selector_data,
     extract_content_by_selectors,
@@ -40,7 +40,7 @@ from src.scraping_service import (
 from src.database import get_db
 from src.models import AutomationRequest
 from src.utils import send_logs_to_backend
-from src.automation_service import run_automation
+from src.automation_service import run_automation, search_urls_from_keywords
 from src.providers import get_provider_instance
 from src.content import build_generation_prompt, build_image_prompt
 from src.schemas import RESPONSE_SCHEMA_V1
@@ -1304,7 +1304,7 @@ THEME_SCHEMA = {
     "/trigger-by-text",
     tags=["trigger-automation"],
     summary="Inicia automação a partir de um texto",
-    description="Recebe um texto, extrai um tema com a IA, salva no banco e prepara a automação.",
+    description="Recebe um texto, extrai o tema e gera fatores de busca via IA, salvando apenas em automation_configs.",
     status_code=200,
 )
 async def trigger_by_text(
@@ -1319,52 +1319,73 @@ async def trigger_by_text(
     task_id = str(uuid.uuid4())
     provider_name = request.provider
 
-    # 1. Extração de Tema e Fatores de Busca
+    # 1️⃣ Geração via IA
     try:
         provider = get_provider_instance(provider_name)
-        MAX_AI_INPUT_CHARS = 10000 
-        
-        prompt = f"Analise o seguinte texto: '{request.textContent[:MAX_AI_INPUT_CHARS]}'. Com base nele, extraia o tema central e gere um objeto JSON serializado de fatores de busca refinados (keywords, fontes, etc.) para coletar material bruto relevante."
+        MAX_AI_INPUT_CHARS = 10000
+
+        prompt = f"""
+        Analise o seguinte texto: '{request.textContent[:MAX_AI_INPUT_CHARS]}'.
+        Gere um objeto JSON com o seguinte formato:
+        {{
+            "theme": "tema principal do texto",
+            "search_factors": ["lista de palavras-chave e expressões relevantes para busca"]
+        }}
+        Responda APENAS com o JSON.
+        """
 
         ai_response: Dict[str, Any] = await provider.generate_content(
-        prompt=prompt,
-        response_schema=AI_RESPONSE_SCHEMA_CONFIG,  
-    )
+            prompt=prompt,
+            response_schema=AI_RESPONSE_SCHEMA_CONFIG,
+        )
 
         theme = ai_response.get("theme")
         search_factors = ai_response.get("search_factors")
-        
+
         if not theme or not search_factors:
-             raise ValueError("A IA não retornou o tema e/ou os fatores de busca esperados.")
+            raise ValueError(
+                "A IA não retornou o tema e/ou os fatores de busca esperados."
+            )
 
     except Exception as e:
         logger.error(f"Erro na extração de tema/fatores de busca: {str(e)}")
-        raise HTTPException(
-            status_code=500, detail=f"Falha na análise de IA: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Falha na análise de IA: {str(e)}")
 
-    # 2. Persistência no DB
+    # 2️⃣ Persistência apenas em automation_configs
     try:
         async with AsyncDatabaseManager(DB_FILE) as conn:
-            # Status: PENDING_COLLECTION (Aguardando Coleta via trigger-by-id)
-            status_id = db_service.get_status_id_by_name("PENDING_COLLECTION", conn)
+            # Novo: não cria registro em materials!
+            # Salva apenas em automation_configs
+            full_config_data = {
+                "search_factors": search_factors,
+                "theme": theme,
+                "content_type": request.content_type,
+                "source_urls": [],  # Inicializa vazio
+                "scraping_log": {},
+            }
 
-            # 2a. Criação do Registro Principal (Tabela materials)
+            # Atualiza status principal da task
+            status_id = db_service.get_status_id_by_name(
+                "PENDING_COLLECTION", conn=conn
+            )
             db_service.save_material(
                 conn=conn,
                 user_id=user_id,
                 automation_request_id=None,
                 task_id=task_id,
                 status_id=status_id,
-                theme=theme,
-                content_type=request.content_type,
+                theme=None,
+                content_type=None,
+                generated_content=None,
+                suggested_image_prompt=None,
+                raw_material_ids=[],
+                source_urls=[],
             )
 
-            # 2b. Salva a Configuração de Busca (Tabela automation_configs - NOVO PASSO)
             db_service.save_automation_config(
                 conn=conn,
                 task_id=task_id,
-                search_factors=search_factors,
+                search_factors=json.dumps(full_config_data),
             )
 
         return TriggerByTextResponse(
@@ -1374,10 +1395,95 @@ async def trigger_by_text(
         )
 
     except Exception as e:
-        logger.error(f"Erro ao salvar tarefa no DB para task_id {task_id}: {str(e)}")
+        logger.error(f"Erro ao salvar automação no DB para task_id {task_id}: {str(e)}")
         raise HTTPException(
-            status_code=500, detail=f"Falha ao persistir a tarefa: {str(e)}"
+            status_code=500, detail=f"Falha ao persistir a automação: {str(e)}"
         )
+
+
+@router.get(
+    "/trigger-by-id/{id}",
+    response_model=TriggerResponse,
+    tags=["trigger-automation"],
+    summary="Aciona automação por ID",
+    description="Inicia a coleta de material bruto com base no ID existente em automation_configs.",
+)
+async def trigger_by_id(
+    id: str,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(Auth.verify_token),
+):
+    """
+    Aciona a automação de coleta de material bruto com base nas palavras-chave
+    previamente geradas e armazenadas em automation_configs.
+    """
+    user_id = current_user.get("sub")
+    task_id = id
+
+    try:
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            # 1️⃣ Busca configuração da automação
+            config_row = db_service.get_automation_config(conn, task_id)
+            if not config_row:
+                raise HTTPException(
+                    status_code=404, detail=f"Automação '{task_id}' não encontrada."
+                )
+
+            try:
+                config_data = json.loads(config_row["search_factors"])
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Erro ao interpretar automation_configs JSON.",
+                )
+
+            search_factors = config_data.get("search_factors")
+            if not search_factors:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Nenhum fator de busca encontrado para essa automação.",
+                )
+
+            # 2️⃣ Busca URLs com base nos search_factors
+            urls = await search_urls_from_keywords(
+                search_factors
+            )  # Função no automation_service.py
+
+            # 3️⃣ Salva URLs obtidas e inicializa log
+            config_data["source_urls"] = urls
+            config_data["scraping_log"] = {url: "pending" for url in urls}
+            db_service.update_automation_config(conn, task_id, json.dumps(config_data))
+
+            # 4️⃣ Dispara scraping (usa a mesma lógica de trigger-multiple-urls)
+            background_tasks.add_task(
+                run_automation,
+                task_id=task_id,
+                user_id=user_id,
+                theme=config_data.get("theme"),
+                content_type=config_data.get("content_type"),
+                search_factors=json.dumps(search_factors),
+                source_urls=urls,
+                return_raw_material_only=True,
+                auth_headers={"Authorization": f"Bearer {current_user.get('token')}"},
+            )
+
+            db_service.update_task_status(conn, task_id, "COLLECTION_INITIATED")
+
+        return JSONResponse(
+            status_code=202,
+            content={
+                "task_id": task_id,
+                "status": "COLLECTION_INITIATED",
+                "message": f"Busca iniciada com {len(urls)} URLs encontradas. Scraping será executado em segundo plano.",
+            },
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro ao acionar automação (task_id={task_id}): {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+
 
 @router.post(
     "/trigger",
@@ -1520,77 +1626,6 @@ async def trigger_automation_post(
             )
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
-
-@router.get(
-    "/trigger-by-id/{id}",
-    response_model=TriggerResponse,
-    tags=["trigger-automation"],
-    summary="Acionar automação por ID",
-    description="Inicia a coleta de material bruto em segundo plano com base em um ID de requisição existente.",
-)
-async def trigger_by_id(
-    id: str,
-    background_tasks: BackgroundTasks,
-    current_user: dict = Depends(Auth.verify_token),
-):
-    """
-    Aciona a automação de coleta de material bruto em segundo plano,
-    usando o ID da tarefa que contém os fatores de busca inteligentes.
-    """
-    user_id = current_user.get("sub")
-    task_id = id 
-
-    try:
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-            # 1. Busca os dados principais da tarefa
-            material_data = db_service.get_material_by_task_id(conn, task_id)
-            if not material_data:
-                raise HTTPException(
-                    status_code=404, detail=f"Tarefa com ID '{task_id}' não encontrada."
-                )
-
-            # 2. Busca a configuração de busca inteligente (search_factors)
-            config_data = db_service.get_automation_config(conn, task_id)
-            if not config_data or not config_data.get("search_factors"):
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Fatores de busca (search_factors) não configurados para o ID '{task_id}'.",
-                )
-
-            # Extração dos parâmetros
-            theme = material_data.get("theme")
-            content_type = material_data.get("content_type")
-            search_factors = config_data.get("search_factors") # String JSON
-
-            # 3. Aciona a coleta em segundo plano (com o novo parâmetro)
-            background_tasks.add_task(
-                run_automation,
-                task_id=task_id,
-                user_id=user_id,
-                theme=theme,
-                content_type=content_type,
-                search_factors=search_factors,
-                return_raw_material_only=True,
-                auth_headers={"Authorization": f"Bearer {current_user.get('token')}"}
-            )
-
-        return JSONResponse(
-            status_code=202,  # Accepted
-            content={
-                "task_id": task_id,
-                "status": "COLLECTION_INITIATED",
-                "message": "Coleta de material bruto iniciada em segundo plano. Use o task_id para monitorar o status.",
-            },
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(
-            f"Erro ao acionar automação para task_id {task_id}: {str(e)}"
-        )
-        raise HTTPException(
-            status_code=500, detail=f"Erro interno ao acionar a automação: {str(e)}"
-        )
 
 @router.get(
     "/posts",

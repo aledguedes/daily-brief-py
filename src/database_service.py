@@ -562,7 +562,6 @@ def get_automation_config(
         )
         config_data = cursor.fetchone()
         if config_data:
-            # Retorna o dicionário com o campo search_factors
             return dict(config_data)
         return None
     except Exception as e:
@@ -712,3 +711,57 @@ def list_user_materials(conn: sqlite3.Connection, user_id: str) -> List[Dict[str
     except Exception as e:
         logger.error(f"Erro ao listar materiais para o user_id: {user_id}: {str(e)}")
         return []
+
+
+def update_automation_config_log(
+    conn: sqlite3.Connection,
+    task_id: str,
+    urls_log: List[Dict[str, str]],
+) -> None:
+    """
+    Busca a configuração JSON existente, adiciona/sobrescreve o log de URLs
+    e salva o JSON atualizado na tabela automation_configs.
+    """
+    try:
+        cursor = conn.cursor()
+
+        config_row = get_automation_config(conn, task_id)
+        if not config_row or not config_row.get("search_factors"):
+            logger.error(f"Configuração não encontrada para o task_id {task_id}")
+            return
+
+        config_data = json.loads(config_row["search_factors"])
+        config_data["collected_urls_log"] = urls_log
+
+        updated_search_factors_json = json.dumps(config_data)
+
+        cursor.execute(
+            """
+            UPDATE automation_configs
+            SET search_factors = ?, updated_at = ?
+            WHERE task_id = ?
+            """,
+            (
+                updated_search_factors_json,
+                datetime.now(timezone.utc).isoformat().replace("+00:00", ""),
+                task_id,
+            ),
+        )
+        conn.commit()
+        logger.info(f"Log de URLs de automação atualizado para task_id: {task_id}")
+    except Exception as e:
+        logger.error(f"Erro ao atualizar log de URLs para task_id {task_id}: {str(e)}")
+        raise
+
+
+def update_automation_config(conn, task_id, updated_json):
+    query = "UPDATE automation_configs SET search_factors = ? WHERE task_id = ?"
+    conn.execute(query, (updated_json, task_id))
+    conn.commit()
+
+
+def update_task_status(conn, task_id, status_name):
+    status_id = get_status_id_by_name(status_name, conn)
+    query = "UPDATE tasks SET status_id = ? WHERE task_id = ?"
+    conn.execute(query, (status_id, task_id))
+    conn.commit()

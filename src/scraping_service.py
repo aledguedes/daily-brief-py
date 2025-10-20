@@ -10,12 +10,6 @@ import src.database_service as db_service
 
 logger = logging.getLogger(__name__)
 
-
-# src/scraping_service.py
-
-# ... (suas importações)
-
-
 async def fetch_url_content(url: str) -> str:
     """
     Busca o conteúdo HTML de uma URL fornecida, com headers de navegador para evitar bloqueios.

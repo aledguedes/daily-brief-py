@@ -762,3 +762,21 @@ async def process_material_task(
             },
             headers,
         )
+
+
+async def search_urls_from_keywords(search_factors: List[str]) -> List[str]:
+    """
+    Realiza buscas de URLs relevantes com base nas palavras-chave.
+    Esta função poderá ser expandida com Google API, Reddit API, SerpAPI, etc.
+    Por enquanto, retorna URLs simuladas para teste do fluxo completo.
+    """
+    logger.info(f"🔍 Buscando URLs para fatores de busca: {search_factors}")
+
+    # ⚠️ MOCK INICIAL — substitua depois por integração real
+    urls = []
+    for factor in search_factors:
+        factor_slug = factor.lower().replace(" ", "-")
+        urls.append(f"https://example.com/article-about-{factor_slug}")
+
+    logger.info(f"✅ {len(urls)} URLs encontradas: {urls}")
+    return urls
