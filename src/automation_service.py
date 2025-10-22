@@ -15,6 +15,7 @@ from src.content import determine_content_type
 from src.utils import save_report, save_payload_to_file, send_logs_to_backend
 import src.database_service as db_service
 import google.generativeai as genai
+from src.scraping import scrape_reddit, scrape_newsapi, scrape_serper
 
 logger = logging.getLogger(__name__)
 
@@ -117,12 +118,12 @@ async def process_theme(
     existing_titles: List[str],
     user_id: str,
     task_id: str,
-    output_format: Optional[str],
+    content_type: Optional[str],
     return_raw_material_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """Processa um tema: extrai material bruto e gera posts."""
     tema = theme_config.get("tema", "Desconhecido")
-    content_type = theme_config.get("tipo", output_format)
+    content_type = theme_config.get("tipo", content_type)
     post_start_time = time.time()
     posts_for_theme = []
     logger.info(f"Processando tema '{tema}' com tipo de conteúdo: {content_type}")
@@ -415,13 +416,14 @@ async def process_intelligent_collection(
 
 
 async def run_automation(
-    output_format: Optional[str] = None,
-    theme: Optional[str] = None,
-    auth_headers: Optional[Dict[str, str]] = None,
-    user_id: str = "anonymous",
-    task_id: Optional[str] = None,
+    task_id: str,
+    user_id: str,
+    theme: str,
+    content_type: str,
+    search_factors: str,
+    source_urls: list[str] | None = None,
     return_raw_material_only: bool = False,
-    search_factors: Optional[str] = None,
+    auth_headers: dict | None = None,
 ) -> Dict[str, Any]:
     """Função principal da automação: orquestra a busca, salvamento de materiais brutos e geração de posts."""
     start_time = time.time()
@@ -429,6 +431,26 @@ async def run_automation(
     logger.info(
         f"Iniciando automação com task_id: {task_id}, tema: '{theme}', retorno_material_bruto_apenas: {return_raw_material_only}"
     )
+
+    if not source_urls:
+        try:
+            logger.info(
+                f"🔍 Nenhuma URL fornecida — gerando URLs a partir dos fatores de busca."
+            )
+            factors = (
+                json.loads(search_factors)
+                if isinstance(search_factors, str)
+                else search_factors
+            )
+            source_urls = await search_urls_from_keywords(factors)
+            logger.info(
+                f"✅ {len(source_urls)} URLs obtidas com base nos fatores de busca."
+            )
+        except Exception as e:
+            logger.error(f"❌ Erro ao buscar URLs a partir dos fatores: {str(e)}")
+            source_urls = []
+    else:
+        logger.info(f"🔗 {len(source_urls)} URLs recebidas diretamente para scraping.")
 
     if Config.LOGS_API_URL and not return_raw_material_only:
         await send_logs_to_backend(
@@ -472,7 +494,7 @@ async def run_automation(
                     task_id=task_id,
                     status_id=status_id,
                     theme=theme,
-                    content_type=output_format,
+                    content_type=content_type,
                 )
                 status = db_service.get_status_by_id(status_id, conn=conn)
                 if not status:
@@ -504,7 +526,7 @@ async def run_automation(
                 task_id=task_id,
                 status_id=status_id,
                 theme=theme,
-                content_type=output_format,
+                content_type=content_type,
             )
 
         for theme_config in themes:
@@ -514,7 +536,7 @@ async def run_automation(
                 existing_titles,
                 user_id,
                 task_id,
-                output_format,
+                content_type,
                 return_raw_material_only,
             )
 
@@ -552,7 +574,7 @@ async def run_automation(
                 task_id=task_id,
                 user_id=user_id,
                 theme=theme,
-                content_type=output_format,  # content_type foi passado como output_format do trigger-by-text
+                content_type=content_type,  # content_type foi passado como content_type do trigger-by-text
                 search_factors=search_factors,
                 auth_headers=auth_headers,
             )
@@ -599,7 +621,7 @@ async def run_automation(
                 task_id=task_id,
                 status_id=status_id,
                 theme=theme,
-                content_type=output_format,
+                content_type=content_type,
             )
             status = db_service.get_status_by_id(status_id, conn=conn)
             if not status:
@@ -764,19 +786,70 @@ async def process_material_task(
         )
 
 
-async def search_urls_from_keywords(search_factors: List[str]) -> List[str]:
-    """
-    Realiza buscas de URLs relevantes com base nas palavras-chave.
-    Esta função poderá ser expandida com Google API, Reddit API, SerpAPI, etc.
-    Por enquanto, retorna URLs simuladas para teste do fluxo completo.
-    """
-    logger.info(f"🔍 Buscando URLs para fatores de busca: {search_factors}")
+# ==========================================================
+# 🔹 Busca real de URLs com base nas palavras-chave
+# ==========================================================
+from src.scraping import scrape_reddit, scrape_newsapi, scrape_serper
 
-    # ⚠️ MOCK INICIAL — substitua depois por integração real
-    urls = []
-    for factor in search_factors:
-        factor_slug = factor.lower().replace(" ", "-")
-        urls.append(f"https://example.com/article-about-{factor_slug}")
 
-    logger.info(f"✅ {len(urls)} URLs encontradas: {urls}")
-    return urls
+async def search_urls_from_keywords(search_factors: list[str]) -> list[str]:
+    """
+    Realiza buscas reais de URLs com base nas palavras-chave fornecidas.
+    Integra-se aos módulos scraping.py (Reddit, NewsAPI e SerpApi).
+    Retorna uma lista deduplicada de URLs válidas.
+    """
+    logger.info(f"🔍 Iniciando busca real de URLs para fatores: {search_factors}")
+
+    all_urls: list[str] = []
+
+    try:
+        # =======================
+        # 1️⃣ SerpApi (Google Search)
+        # =======================
+        try:
+            serp_results = scrape_serper(
+                search_factors
+            )  # 🔹 sem await (função síncrona)
+            if serp_results:
+                logger.info(f"🌐 {len(serp_results)} URLs retornadas da SerpApi")
+                all_urls.extend(serp_results)
+        except Exception as e:
+            logger.warning(f"⚠️ Falha na SerpApi: {e}")
+
+        # =======================
+        # 2️⃣ NewsAPI
+        # =======================
+        try:
+            newsapi_results = scrape_newsapi(search_factors)  # 🔹 sem await
+            if newsapi_results:
+                logger.info(f"📰 {len(newsapi_results)} URLs retornadas da NewsAPI")
+                all_urls.extend(newsapi_results)
+        except Exception as e:
+            logger.warning(f"⚠️ Falha na NewsAPI: {e}")
+
+        # =======================
+        # 3️⃣ Reddit (assíncrono)
+        # =======================
+        try:
+            reddit_results = await scrape_reddit(search_factors)  # ✅ precisa de await
+            if reddit_results:
+                logger.info(f"💬 {len(reddit_results)} URLs retornadas do Reddit")
+                all_urls.extend(reddit_results)
+        except Exception as e:
+            logger.warning(f"⚠️ Falha no Reddit: {e}")
+
+    except Exception as e:
+        logger.error(f"❌ Erro geral ao buscar URLs com base nos fatores: {str(e)}")
+
+    # =======================
+    # 4️⃣ Deduplicação e limpeza
+    # =======================
+    cleaned_urls = []
+    for u in all_urls:
+        if isinstance(u, str) and u.startswith("http"):
+            cleaned = u.strip().split("?")[0]
+            if cleaned not in cleaned_urls:
+                cleaned_urls.append(cleaned)
+
+    logger.info(f"✅ {len(cleaned_urls)} URLs finais coletadas após deduplicação")
+    return cleaned_urls

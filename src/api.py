@@ -172,7 +172,7 @@ class TriggerRequest(BaseModel):
     )
 
     class Config:
-        allow_population_by_field_name = True
+        validate_by_name = True
 
 
 class UrlRequest(BaseModel):
@@ -185,7 +185,7 @@ class ExtractFromUrlsRequest(BaseModel):
     )
 
     class Config:
-        allow_population_by_field_name = True
+        validate_by_name = True
 
 
 class GenerateContentRequest(BaseModel):
@@ -201,7 +201,7 @@ class GenerateContentRequest(BaseModel):
     )
 
     class Config:
-        allow_population_by_field_name = True
+        validate_by_name = True
 
 
 class RawMaterialRequest(BaseModel):
@@ -465,8 +465,12 @@ async def generate_content_manual(
                 raise HTTPException(
                     status_code=500, detail="Status FAILED_GENERATION não encontrado."
                 )
+
             db_service.update_material_status(
-                user_id, task_id, "FAILED_GENERATION", conn=conn
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status_name="FAILED_GENERATION",
             )
         raise HTTPException(status_code=500, detail=f"Erro na geração: {str(e)}")
 
@@ -781,8 +785,12 @@ async def process_material_task(
                         status_code=500,
                         detail="Status FAILED_GENERATION não encontrado.",
                     )
+
                 db_service.update_material_status(
-                    user_id, task_id, "FAILED_GENERATION", conn=conn
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    new_status_name="FAILED_GENERATION",
                 )
                 return
 
@@ -832,8 +840,12 @@ async def process_material_task(
                 raise HTTPException(
                     status_code=500, detail="Status FAILED_GENERATION não encontrado."
                 )
+
             db_service.update_material_status(
-                user_id, task_id, "FAILED_GENERATION", conn=conn
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status_name="FAILED_GENERATION",
             )
 
 
@@ -1159,8 +1171,12 @@ async def generate_content(
                 raise HTTPException(
                     status_code=500, detail="Status PENDING_GENERATION não encontrado."
                 )
+
             db_service.update_material_status(
-                user_id, task_id, "PENDING_GENERATION", conn=conn
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status_name="PENDING_GENERATION",
             )
 
             generated_data = await generate_content_with_provider_service(
@@ -1182,7 +1198,6 @@ async def generate_content(
                 status_id=status_id,
                 theme=theme,
                 content_type=content_type,
-                raw_material=compiled_raw_material,
                 generated_content=json.dumps(generated_data, ensure_ascii=False),
                 suggested_image_prompt=generated_data.get("suggested_image_prompt"),
                 conn=conn,
@@ -1221,8 +1236,12 @@ async def generate_content(
                         status_code=500,
                         detail="Status FAILED_GENERATION não encontrado.",
                     )
+
                 db_service.update_material_status(
-                    user_id, task_id, "FAILED_GENERATION", conn=conn
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    new_status_name="FAILED_GENERATION",
                 )
         except Exception:
             pass
@@ -1288,7 +1307,7 @@ class ContentInput(BaseModel):
     )
 
     class Config:
-        allow_population_by_field_name = True
+        validate_by_name = True
 
 
 THEME_SCHEMA = {
@@ -1351,41 +1370,32 @@ async def trigger_by_text(
         logger.error(f"Erro na extração de tema/fatores de busca: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Falha na análise de IA: {str(e)}")
 
-    # 2️⃣ Persistência apenas em automation_configs
     try:
         async with AsyncDatabaseManager(DB_FILE) as conn:
-            # Novo: não cria registro em materials!
-            # Salva apenas em automation_configs
-            full_config_data = {
-                "search_factors": search_factors,
-                "theme": theme,
-                "content_type": request.content_type,
-                "source_urls": [],  # Inicializa vazio
-                "scraping_log": {},
-            }
 
-            # Atualiza status principal da task
+            # status_id = db_service.get_status_id_by_name(conn, "PENDING_COLLECTION")
             status_id = db_service.get_status_id_by_name(
                 "PENDING_COLLECTION", conn=conn
             )
-            db_service.save_material(
-                conn=conn,
-                user_id=user_id,
-                automation_request_id=None,
-                task_id=task_id,
-                status_id=status_id,
-                theme=None,
-                content_type=None,
-                generated_content=None,
-                suggested_image_prompt=None,
-                raw_material_ids=[],
-                source_urls=[],
-            )
+
+            if not status_id:
+                raise ValueError(
+                    "Status 'PENDING_COLLECTION' não encontrado no banco de dados."
+                )
+
+            full_config_data = {
+                "theme": theme,
+                "content_type": request.content_type,
+                "search_factors": search_factors,
+                "source_urls": [],
+                "scraping_log": {},
+            }
 
             db_service.save_automation_config(
                 conn=conn,
                 task_id=task_id,
-                search_factors=json.dumps(full_config_data),
+                status_id=status_id,
+                search_factors=full_config_data,
             )
 
         return TriggerByTextResponse(
@@ -1574,8 +1584,12 @@ async def trigger_automation_post(
                 raise HTTPException(
                     status_code=500, detail="Status FAILED_GENERATION não encontrado."
                 )
+
             db_service.update_material_status(
-                user_id, task_id, "FAILED_GENERATION", conn=conn
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status_name="FAILED_GENERATION",
             )
         raise HTTPException(
             status_code=400,
@@ -1599,8 +1613,12 @@ async def trigger_automation_post(
                 raise HTTPException(
                     status_code=500, detail="Status FAILED_GENERATION não encontrado."
                 )
+
             db_service.update_material_status(
-                user_id, task_id, "FAILED_GENERATION", conn=conn
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status_name="FAILED_GENERATION",
             )
         raise
     except Exception as e:
@@ -1621,8 +1639,12 @@ async def trigger_automation_post(
                 raise HTTPException(
                     status_code=500, detail="Status FAILED_GENERATION não encontrado."
                 )
+
             db_service.update_material_status(
-                user_id, task_id, "FAILED_GENERATION", conn=conn
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status_name="FAILED_GENERATION",
             )
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
@@ -1799,4 +1821,56 @@ async def list_raw_materials_by_ids(
         logger.error(f"Erro ao listar materiais brutos por IDs: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Erro ao listar materiais: {str(e)}"
+        )
+
+
+class AutomationConfigResponse(BaseModel):
+    task_id: str
+    status: StatusResponse
+    search_factors: Dict[str, Any]
+    created_at: str
+
+
+@router.get(
+    "/automation_configs/list_all",
+    response_model=List[AutomationConfigResponse],
+    summary="Lista todas as configurações de automação.",
+    description="Retorna uma lista de todas as configurações, permitindo filtrar pelo ID do status da tarefa (opcional).",
+)
+async def list_all_automation_configs(
+    status_id: Optional[int] = Query(
+        None,
+        description="Filtra pelo ID do status da tarefa (ex: 15 para 'COMPLETED').",
+    ),
+):
+    try:
+        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
+            configs_data = db_service.get_automation_configs_list(
+                conn, status_id=status_id
+            )
+
+            logger.info(f"Dados retornados do banco: {configs_data}")
+
+            response_list = []
+            for item in configs_data:
+                status = db_service.get_status_by_id(item["status_id"], conn=conn)
+                response_list.append(
+                    AutomationConfigResponse(
+                        task_id=item["task_id"],
+                        status=status,
+                        search_factors=json.loads(item["search_factors"]),
+                        created_at=item["created_at"],
+                    )
+                )
+
+            return (
+                response_list
+                if response_list
+                else JSONResponse(content=[], status_code=200)
+            )
+
+    except Exception as e:
+        logger.error(f"Erro ao listar configurações: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Erro interno do servidor: {str(e)}"
         )

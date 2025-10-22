@@ -237,30 +237,16 @@ def init_db():
                 """
             )
 
-            # Tabela selectors
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS selectors (
-                    user_id TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    parent_selector TEXT,
-                    title_selector TEXT,
-                    content_selector TEXT,
-                    image_selector TEXT,
-                    PRIMARY KEY (user_id, url)
-                );
-                """
-            )
-
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS automation_configs (
                     task_id TEXT PRIMARY KEY,
+                    status_id INTEGER NOT NULL,
                     search_factors TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    FOREIGN KEY (task_id) REFERENCES materials(task_id) ON DELETE CASCADE
+                    FOREIGN KEY (status_id) REFERENCES status(id)
                 );
-                    """
+                """
             )
 
             # Popula a tabela status
@@ -302,19 +288,24 @@ def save_raw_material(
 def save_automation_config(
     conn: sqlite3.Connection,
     task_id: str,
-    search_factors: str,
+    status_id: int,
+    search_factors: dict,  # Espera dict aqui
 ) -> None:
     """Salva a configuração de busca gerada pela IA na tabela automation_configs."""
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "")
     try:
         cursor = conn.cursor()
-        # Usar INSERT OR REPLACE para garantir que a config seja sempre atualizada/criada (idempotência)
         cursor.execute(
             """
-            INSERT OR REPLACE INTO automation_configs (task_id, search_factors, created_at)
-            VALUES (?, ?, ?)
+            INSERT OR REPLACE INTO automation_configs (task_id, status_id, search_factors, created_at)
+            VALUES (?, ?, ?, ?)
             """,
-            (task_id, search_factors, now),
+            (
+                task_id,
+                status_id,
+                json.dumps(search_factors),  # Serializa aqui
+                now,
+            ),
         )
         logger.info(
             f"Configuração de automação salva/atualizada para task_id: {task_id}"
@@ -429,7 +420,7 @@ def save_material(
     status_id: int,
     theme: Optional[str] = None,
     content_type: Optional[str] = None,
-    raw_material_ids: Optional[List[str]] = None,
+    # raw_material_ids: Optional[List[str]] = None,
     generated_content: Optional[str] = None,
     suggested_image_prompt: Optional[str] = None,
     source_urls: Optional[List[str]] = None,
@@ -762,6 +753,43 @@ def update_automation_config(conn, task_id, updated_json):
 
 def update_task_status(conn, task_id, status_name):
     status_id = get_status_id_by_name(status_name, conn)
-    query = "UPDATE tasks SET status_id = ? WHERE task_id = ?"
+    query = "UPDATE materials SET status_id = ? WHERE task_id = ?"
     conn.execute(query, (status_id, task_id))
     conn.commit()
+
+
+def get_automation_configs_list(
+    conn: sqlite3.Connection,
+    status_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Busca todas as configurações de automação, filtrando diretamente pelo status_id.
+    """
+    try:
+        conn.row_factory = sqlite3.Row  # 🟢 Garantir que row vira dicionário
+        cursor = conn.cursor()
+
+        query = """
+            SELECT 
+                task_id, 
+                status_id,  
+                search_factors, 
+                created_at 
+            FROM automation_configs
+        """
+        params = []
+
+        if status_id is not None:
+            query += " WHERE status_id = ?"
+            params.append(status_id)
+
+        query += " ORDER BY created_at DESC"
+
+        logger.info(f"Executando consulta: {query} com parâmetros: {params}")
+        cursor.execute(query, tuple(params))
+
+        return [dict(row) for row in cursor.fetchall()]
+
+    except Exception as e:
+        logger.error(f"Erro ao listar configurações de automação: {str(e)}")
+        return []
