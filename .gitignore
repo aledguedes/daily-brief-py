@@ -40,6 +40,7 @@ test_login.py
 setup.sh
 setup.py
 token.txt
+resume.txt
 
 # Arquivos de sistema
 .DS_Store
@@ -48,3 +49,9 @@ Thumbs.db
 # Outros arquivos que não deseja versionar
 *.bak
 *.swp
+
+# Arquivos de banco de dados
+*.db
+*.sqlite
+*.sqlite3
+dailyBrief.db

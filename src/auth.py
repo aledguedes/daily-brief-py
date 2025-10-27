@@ -1,108 +1,102 @@
 # src/auth.py
-import jwt
 import requests
-import os
-from datetime import datetime, timezone, timedelta # Importar timedelta
 import logging
+import jwt
+import base64
+from datetime import datetime, timedelta, timezone
 from src.config import Config
-from tenacity import retry, stop_after_attempt, wait_fixed # Para retries
+from fastapi import HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-# O logger básico já está configurado em logging_config.py ou server.py
-# Remova a configuração básica aqui se já estiver em outro lugar
-# logging.basicConfig(...)
 logger = logging.getLogger(__name__)
+security = HTTPBearer()
 
-# Caminho do arquivo de token
-TOKEN_FILE = "output/token.txt" # Salvar token na pasta output
 
 class Auth:
-    @staticmethod
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(5)) # Retenta a autenticação se falhar
-    def authenticate():
+    _jwt_secret = None
+
+    @classmethod
+    def _get_jwt_secret(cls):
+        """Decodifica e retorna a chave secreta JWT, armazenando-a em cache."""
+        if cls._jwt_secret is None:
+            try:
+                cls._jwt_secret = base64.b64decode(Config.JWT_SECRET_KEY)
+                logger.info("Chave JWT decodificada com sucesso.")
+            except Exception as e:
+                logger.critical(
+                    f"Erro CRÍTICO ao decodificar JWT_SECRET_BASE64: {str(e)}. Não será possível verificar tokens.",
+                    exc_info=True,
+                )
+                cls._jwt_secret = b"fallback_secret_para_evitar_erro_startup_insecure"  # Fallback seguro
+        return cls._jwt_secret
+
+    @classmethod
+    def authenticate(cls):
         """
-        Autentica no backend, lendo um token existente ou gerando um novo se necessário.
-        Implementa retry para o processo de autenticação.
+        Autentica no backend Spring Boot e retorna os headers de autorização.
         """
-        logger.info("Iniciando processo de autenticação...")
-        token = None
+        url = Config.AUTH_URL
+        payload = {"email": Config.ADMIN_EMAIL, "password": Config.ADMIN_PASSWORD}
+        logger.info(f"Tentando autenticar como admin em: {url}")
         try:
-            # Verifica se o arquivo de token existe
-            if os.path.exists(TOKEN_FILE):
-                with open(TOKEN_FILE, "r", encoding="utf-8") as f:
-                    token = f.read().strip()
-                logger.debug(f"Token lido de {TOKEN_FILE}")
-
-                # Verifica a expiração do token (sem verificar a assinatura aqui)
-                if token:
-                    try:
-                        # Adicionado options={"verify_signature": False} para apenas decodificar e verificar expiração
-                        payload = jwt.decode(token, options={"verify_signature": False})
-                        exp = payload.get("exp")
-                        # Verifica se 'exp' existe e se o timestamp é futuro
-                        if exp and datetime.fromtimestamp(exp, tz=timezone.utc) > datetime.now(timezone.utc) + timedelta(minutes=5): # Considera válido se expirar em mais de 5 minutos
-                            logger.info(f"Token existente em {TOKEN_FILE} válido até {datetime.fromtimestamp(exp, tz=timezone.utc).isoformat()}.")
-                            return {"Authorization": f"Bearer {token}"}
-                        else:
-                            logger.warning(f"Token existente em {TOKEN_FILE} expirado ou próximo da expiração ({datetime.fromtimestamp(exp, tz=timezone.utc).isoformat() if exp else 'sem expiração'}). Gerando novo token.")
-                            # Se expirado ou próximo, força a geração de um novo
-                            return Auth.authenticate_new()
-                    except jwt.InvalidTokenError as e:
-                        logger.warning(f"Token existente em {TOKEN_FILE} inválido: {str(e)}. Gerando novo token.", exc_info=True)
-                        # Se inválido, força a geração de um novo
-                        return Auth.authenticate_new()
-                else:
-                    logger.warning(f"Arquivo {TOKEN_FILE} encontrado, mas vazio. Gerando novo token.")
-                    # Se o arquivo estiver vazio, força a geração de um novo
-                    return Auth.authenticate_new()
-
-            else:
-                logger.warning(f"Arquivo {TOKEN_FILE} não encontrado. Gerando novo token.")
-                # Se o arquivo não existe, força a geração de um novo
-                return Auth.authenticate_new()
-
-        except Exception as e:
-            logger.error(f"Erro inesperado ao tentar ler ou verificar token em {TOKEN_FILE}: {str(e)}. Tentando gerar novo token.", exc_info=True)
-            # Em caso de qualquer erro na leitura/verificação, tenta gerar um novo token
-            return Auth.authenticate_new()
-
-    @staticmethod
-    def authenticate_new():
-        """Gera um novo token de autenticação fazendo uma requisição para o backend."""
-        logger.info(f"Iniciando processo de autenticação para gerar um novo token em {Config.AUTH_URL}.")
-        if not Config.ADMIN_EMAIL or not Config.ADMIN_PASSWORD:
-             logger.error("Credenciais de administrador (ADMIN_EMAIL ou ADMIN_PASSWORD) não configuradas. Não é possível autenticar.")
-             raise ValueError("Credenciais de administrador ausentes.")
-
-        auth_data = {
-            "email": Config.ADMIN_EMAIL,
-            "password": Config.ADMIN_PASSWORD
-        }
-        try:
-            # Adicionado timeout
-            auth_response = requests.post(Config.AUTH_URL, json=auth_data, timeout=Config.REQUEST_TIMEOUT)
-            auth_response.raise_for_status() # Levanta exceção para status de erro
-
-            token = auth_response.json().get("token")
+            response = requests.post(url, json=payload, timeout=Config.REQUEST_TIMEOUT)
+            response.raise_for_status()
+            token = response.json().get("token")
             if not token:
-                logger.error(f"Resposta de autenticação de {Config.AUTH_URL} não contém token. Resposta: {auth_response.text}")
-                raise ValueError("Falha na autenticação: token ausente na resposta do backend")
-
-            # Garante que a pasta output existe antes de salvar
-            os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
-            with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-                f.write(token)
-            logger.info(f"Novo token gerado e salvo com sucesso em {TOKEN_FILE}.")
-
+                raise ValueError("Token não recebido na resposta de autenticação.")
+            logger.info("Autenticação bem-sucedida. Token recebido.")
             return {"Authorization": f"Bearer {token}"}
-
         except requests.exceptions.Timeout:
-            logger.error(f"Timeout ao autenticar com {Config.AUTH_URL}", exc_info=True)
-            raise # Levanta para o retry da tenacity em authenticate()
+            logger.error(f"Timeout ao autenticar em {url}", exc_info=True)
+            raise
         except requests.exceptions.RequestException as e:
-            logger.error(f"Erro HTTP/Requisição ao autenticar com {Config.AUTH_URL}: {str(e)}", exc_info=True)
-            if hasattr(e, 'response') and e.response is not None:
-                 logger.error(f"Resposta de erro do backend: Status {e.response.status_code}, Corpo: {e.response.text}")
-            raise # Levanta para o retry da tenacity em authenticate()
+            logger.error(
+                f"Erro HTTP/Requisição ao autenticar em {url}: {str(e)}", exc_info=True
+            )
+            if hasattr(e, "response") and e.response is not None:
+                logger.error(
+                    f"Resposta de erro do backend: Status {e.response.status_code}, Corpo: {e.response.text}"
+                )
+            raise
         except Exception as e:
-            logger.error(f"Erro inesperado ao autenticar com {Config.AUTH_URL}: {str(e)}", exc_info=True)
-            raise # Levanta para o retry da tenacity em authenticate()
+            logger.error(
+                f"Erro inesperado durante a autenticação: {str(e)}", exc_info=True
+            )
+            raise
+
+    @staticmethod
+    def create_token(data: dict):
+        """
+        Cria um token JWT.
+        """
+        to_encode = data.copy()
+        expire = datetime.now(timezone.utc) + timedelta(
+            seconds=Config.TOKEN_EXPIRATION_TIME
+        )
+        to_encode.update({"exp": expire})
+        encoded_jwt = jwt.encode(to_encode, Auth._get_jwt_secret(), algorithm="HS512")
+        return encoded_jwt
+
+    @staticmethod
+    def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+        """
+        Verifica um token JWT. Usado como dependência do FastAPI.
+        """
+        token = credentials.credentials
+        logger.debug(f"Verificando token JWT: {token[:10]}...")
+        try:
+            payload = jwt.decode(token, Auth._get_jwt_secret(), algorithms=["HS512"])
+            logger.info(f"Token verificado com sucesso. Payload: {payload}")
+            return payload
+        except jwt.ExpiredSignatureError:
+            logger.warning("Token JWT expirado.")
+            raise HTTPException(status_code=401, detail="Token expirado")
+        except jwt.InvalidTokenError as e:
+            logger.error(f"Token JWT inválido: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=401, detail=f"Token inválido: {str(e)}")
+        except Exception as e:
+            logger.error(f"Erro inesperado ao verificar token: {str(e)}", exc_info=True)
+            # Não enviar logs de erro de token para o backend aqui para evitar loops ou sobrecarga
+            raise HTTPException(
+                status_code=500, detail="Erro interno ao verificar token"
+            )
