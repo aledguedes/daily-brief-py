@@ -559,13 +559,13 @@ async def get_task_result(
 
 
 @router.get(
-    "/list-user-materials",
+    "/list-all-materials",
     response_model=List[MaterialResponse],
     tags=["Automação"],
     summary="Listar materiais do usuário",
     description="Retorna todos os materiais associados ao usuário autenticado.",
 )
-async def list_user_materials(
+async def list_all_materials(
     user: dict = Depends(Auth.verify_token),
 ):
     try:

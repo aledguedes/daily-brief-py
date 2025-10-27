@@ -70,6 +70,7 @@ origins = [
     "http://localhost:4200",
     "http://localhost:3300",
     "http://127.0.0.1:5500",
+    "http://127.0.0.1:3300",  # Adicionado para cobrir variações
 ]
 
 app.add_middleware(
@@ -124,6 +125,16 @@ async def test_ok_endpoint():
     return JSONResponse(
         content={"status": "ok", "message": "Conexão com servidor Python bem-sucedida!"}
     )
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(
+        f"Requisição: {request.method} {request.url} - Origin: {request.headers.get('origin')}"
+    )
+    response = await call_next(request)
+    logger.info(f"Resposta: {response.status_code} - Headers: {response.headers}")
+    return response
 
 
 if __name__ == "__main__":
