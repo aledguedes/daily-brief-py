@@ -35,7 +35,7 @@ def save_automation_data_to_postgres(data: Dict[str, Any]) -> Optional[Dict]:
     Retorna o registro salvo ou None em caso de erro.
     """
     sql = """
-        INSERT INTO materials (user_id, automation_request_id, task_id, status_id, theme, content_type)
+        INSERT INTO tbl_materials (user_id, automation_request_id, task_id, status_id, theme, content_type)
         VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING *;
     """
@@ -72,7 +72,7 @@ def save_automation_data_to_postgres(data: Dict[str, Any]) -> Optional[Dict]:
 
 def get_status_id_by_name(conn, status_name: str) -> Optional[int]:
     """Busca o ID do status pelo nome na tabela material_status."""
-    sql = "SELECT id FROM material_status WHERE name = %s;"
+    sql = "SELECT id FROM tbl_material_status WHERE name = %s;"
     try:
         # Cursor sem extras.RealDictCursor para fetchone simples
         cur = conn.cursor()
@@ -103,7 +103,7 @@ def update_material_status(
         return False
 
     sql = """
-        UPDATE materials 
+        UPDATE tbl_materials 
         SET status_id = %s, updated_at = NOW() 
         WHERE task_id = %s AND user_id = %s;
     """

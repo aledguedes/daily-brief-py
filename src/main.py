@@ -11,7 +11,6 @@ import uuid
 from src.config import Config
 from src.auth import Auth
 from src.api import (
-    get_existing_posts,
     process_material_task,
     send_post,
     generate_content_with_gemini_service,
@@ -203,9 +202,7 @@ async def main(
         if Config.LOGS_API_URL:
             log_data = {
                 "action": f"Erro CRÍTICO na automação: {str(e)}",
-                "timestamp": datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", ""),
+                "timestamp": datetime.now(timezone.utc).replace("+00:00", ""),
                 "level": "CRITICAL",
                 "report_id": task_id,
             }

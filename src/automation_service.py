@@ -20,19 +20,6 @@ from src.scraping import scrape_reddit, scrape_newsapi, scrape_serper
 logger = logging.getLogger(__name__)
 
 
-async def get_existing_posts(user_id: str) -> List[str]:
-    """
-    Obtém os títulos dos posts existentes para evitar duplicatas.
-    """
-    try:
-        async with db_service.AsyncDatabaseManager(db_service.DB_FILE) as conn:
-            posts = await db_service.list_user_materials(conn, user_id)
-        return [post.get("theme", "") for post in posts if post.get("theme")]
-    except Exception as e:
-        logger.error(f"Erro ao buscar posts existentes: {str(e)}")
-        return []
-
-
 def send_post(payload: dict):
     """Envia o post gerado para a API configurada."""
     if Config.POST_API_URL:
@@ -168,7 +155,7 @@ async def process_theme(
             )
             raw_material_ids = [raw_material_id]
 
-            # Atualiza os raw_material_ids e source_urls na tabela materials
+            # Atualiza os raw_material_ids e source_urls na tabela tbl_materials
             db_service.update_material_raw_material_ids(
                 conn=conn,
                 task_id=task_id,
@@ -245,9 +232,9 @@ async def process_theme(
                     "summary": post_summary,
                     "content": content_final,
                     "url_fonte": unique_source_urls[0] if unique_source_urls else "",
-                    "data_publicacao": datetime.now(timezone.utc)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "data_publicacao": datetime.now(timezone.utc).replace(
+                        "+00:00", "Z"
+                    ),
                     "task_id": task_id,
                     "user_id": user_id,
                     "tema": tema,
@@ -369,14 +356,14 @@ async def process_intelligent_collection(
                 raw_material_ids.append(raw_id)
                 source_urls.append(material["url"])
 
-            # 3. Atualiza a tabela 'materials' com os IDs e URLs coletados
+            # 3. Atualiza a tabela 'tbl_materials' com os IDs e URLs coletados
             db_service.update_material_raw_material_ids(  # Função implícita no DB Service
                 conn=conn,
                 task_id=task_id,
                 raw_material_ids=raw_material_ids,
             )
 
-            # Atualiza o status e metadados na tabela 'materials'
+            # Atualiza o status e metadados na tabela 'tbl_materials'
             db_service.save_material(  # Reutiliza save_material para atualizar metadados (source_urls, status, etc.)
                 conn=conn,
                 user_id=user_id,
@@ -708,9 +695,9 @@ async def process_material_task(
                     "summary": post_summary,
                     "content": content_final,
                     "url_fonte": material.get("url", ""),
-                    "data_publicacao": datetime.now(timezone.utc)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "data_publicacao": datetime.now(timezone.utc).replace(
+                        "+00:00", "Z"
+                    ),
                     "task_id": task_id,
                     "user_id": db_user_id,
                     "tema": material.get("theme", "Desconhecido"),

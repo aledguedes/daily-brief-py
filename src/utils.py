@@ -22,7 +22,7 @@ os.makedirs("output/payloads", exist_ok=True)
 def save_cache(data):
     """Salva dados no arquivo de cache."""
     try:
-        cache_data = {"timestamp": datetime.now(timezone.utc).isoformat(), "data": data}
+        cache_data = {"timestamp": datetime.now(timezone.utc), "data": data}
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, ensure_ascii=False, indent=4)
         logger.info(f"Cache salvo em {CACHE_FILE}.")
@@ -53,11 +53,11 @@ def check_cache(cache_duration_hours):
         expiration_time = cache_timestamp + timedelta(hours=cache_duration_hours)
 
         if datetime.now(timezone.utc) < expiration_time:
-            logger.info(f"Cache válido. Expira em: {expiration_time.isoformat()}.")
+            logger.info(f"Cache válido. Expira em: {expiration_time}.")
             return cached_data
         else:
             logger.info(
-                f"Cache expirado. Salvo em: {cache_timestamp.isoformat()}. Expiração: {expiration_time.isoformat()}."
+                f"Cache expirado. Salvo em: {cache_timestamp}. Expiração: {expiration_time}."
             )
             return None
     except json.JSONDecodeError:

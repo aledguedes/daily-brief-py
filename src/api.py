@@ -7,6 +7,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 import asyncio
+import asyncpg
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Query
 from fastapi.responses import JSONResponse
@@ -24,6 +25,7 @@ from src.auth import Auth
 import src.database_service as db_service
 from src.database_service import (
     AsyncDatabaseManager,
+    AsyncPostgresManager,
     DB_FILE,
     get_db_connection,
     save_automation_config,
@@ -349,7 +351,7 @@ async def generate_content_with_provider_service(
                 "ES": f"Fallo en la geração para {theme}.",
             },
             "tags": generated_content_data.get("tags") or [],
-            "category": generated_content_data.get("category") or "General",
+            "category_id": generated_content_data.get("category_id") or 1,
             "suggested_image_prompt": suggested_image_prompt,
         }
 
@@ -385,7 +387,7 @@ async def generate_content_with_provider_service(
                 "ES": f"Fallo en la geração para {theme}.",
             },
             "tags": [],
-            "category": "Error",
+            "category_id": "Error",
             "suggested_image_prompt": f"Error generating content for {theme} using {provider_name}",
         }
 
@@ -398,81 +400,6 @@ async def generate_content_with_provider_service(
 )
 async def test_endpoint():
     return {"status": "ok", "message": "Conexão com servidor Python bem-sucedida!"}
-
-
-@router.post(
-    "/generate-content-manual",
-    tags=["generate-content"],
-    summary="Gerar conteúdo manualmente",
-    description="Gera conteúdo com base em material bruto fornecido manualmente, usando o provedor de IA especificado.",
-)
-async def generate_content_manual(
-    request: GenerateContentManualRequest,
-    user: dict = Depends(Auth.verify_token),
-):
-    user_id = user.get("sub")
-    task_id = request.task_id
-    provider_name = request.provider
-
-    try:
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-            generated_data = await generate_content_with_provider_service(
-                provider_name=provider_name,
-                theme=request.theme,
-                raw_material=request.raw_material[: Config.MAX_TEXT_LEN],
-                content_type=request.content_type,
-            )
-
-            status_id = db_service.get_status_id_by_name("GENERATED", conn=conn)
-            if not status_id:
-                raise HTTPException(
-                    status_code=500, detail="Status GENERATED não encontrado."
-                )
-
-            db_service.save_material(
-                user_id=user_id,
-                automation_request_id=None,
-                task_id=task_id,
-                status_id=status_id,
-                theme=request.theme,
-                content_type=request.content_type,
-                raw_material=request.raw_material,
-                generated_content=json.dumps(generated_data, ensure_ascii=False),
-                suggested_image_prompt=generated_data.get("suggested_image_prompt"),
-                conn=conn,
-            )
-
-            logger.info(f"Task {task_id} de geração manual salva no DB com sucesso.")
-
-            status = db_service.get_status_by_id(status_id, conn=conn)
-            if not status:
-                raise HTTPException(
-                    status_code=500, detail=f"Status ID {status_id} não encontrado."
-                )
-            return {
-                "message": "Conteúdo gerado com sucesso!",
-                "task_id": task_id,
-                "status": status,
-                "generated_content": generated_data,
-            }
-    except Exception as e:
-        logger.error(
-            f"Erro na geração manual de conteúdo para task_id {task_id} (Provedor: {provider_name}): {str(e)}"
-        )
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
-            if not status_id:
-                raise HTTPException(
-                    status_code=500, detail="Status FAILED_GENERATION não encontrado."
-                )
-
-            db_service.update_material_status(
-                conn=conn,
-                user_id=user_id,
-                task_id=task_id,
-                new_status_name="FAILED_GENERATION",
-            )
-        raise HTTPException(status_code=500, detail=f"Erro na geração: {str(e)}")
 
 
 @router.post(
@@ -712,7 +639,7 @@ async def update_raw_material(
                 (
                     id,
                     old_content,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(timezone.utc),
                     user_id,
                     task_id,
                 ),
@@ -727,7 +654,7 @@ async def update_raw_material(
                 """,
                 (
                     request.content,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(timezone.utc),
                     id,
                 ),
             )
@@ -990,264 +917,6 @@ async def trigger_by_url(
         raise HTTPException(status_code=500, detail=f"Erro na extração: {str(e)}")
 
 
-@router.post(
-    "/trigger-multiple-urls",
-    response_model=TriggerResponse,
-    tags=["trigger-automation"],
-    summary="Acionar scraping por várias URLs",
-    description="Extrai conteúdo de várias URLs, salva os materiais brutos e retorna o task_id.",
-)
-async def trigger_multiple_urls(
-    request: ExtractFromUrlsRequest,
-    user: dict = Depends(Auth.verify_token),
-):
-    task_id = str(uuid.uuid4())
-    user_id = user.get("sub")
-    raw_material_ids = []
-
-    try:
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-            status_id = db_service.get_status_id_by_name(
-                "PENDING_COLLECTION", conn=conn
-            )
-            if not status_id:
-                raise HTTPException(
-                    status_code=500, detail="Status PENDING_COLLECTION não encontrado."
-                )
-
-            db_service.save_material(
-                user_id=user_id,
-                automation_request_id=None,
-                task_id=task_id,
-                status_id=status_id,
-                theme=None,
-                content_type=None,
-                source_urls=[str(url) for url in request.urls],
-                conn=conn,
-            )
-
-            for url in request.urls:
-                url_str = str(url)
-                content = await fetch_url_content(url_str)
-                if not content:
-                    logger.warning(f"Nenhum conteúdo retornado para a URL: {url_str}")
-                    continue
-
-                cleaned_content = clean_html_content(content)
-                if cleaned_content:
-                    raw_id = db_service.save_raw_material(
-                        conn=conn,
-                        user_id=user_id,
-                        task_id=task_id,
-                        url=url_str,
-                        content=cleaned_content,
-                    )
-                    raw_material_ids.append(raw_id)
-
-            if not raw_material_ids:
-                status_id = db_service.get_status_id_by_name(
-                    "COLLECTION_FAILED", conn=conn
-                )
-                if not status_id:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Status COLLECTION_FAILED não encontrado.",
-                    )
-                db_service.update_material_status(
-                    conn=conn,
-                    user_id=user_id,
-                    task_id=task_id,
-                    new_status_name="COLLECTION_FAILED",
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail="Nenhum conteúdo extraído das URLs fornecidas",
-                )
-
-            db_service.update_material_raw_material_ids(
-                conn=conn,
-                task_id=task_id,
-                raw_material_ids=raw_material_ids,
-            )
-            status_id = db_service.get_status_id_by_name("RAW_COLLECTED", conn=conn)
-            if not status_id:
-                raise HTTPException(
-                    status_code=500, detail="Status RAW_COLLECTED não encontrado."
-                )
-            db_service.update_material_status(
-                conn=conn,
-                user_id=user_id,
-                task_id=task_id,
-                new_status_name="RAW_COLLECTED",
-            )
-
-            status = db_service.get_status_by_id(status_id, conn=conn)
-            if not status:
-                raise HTTPException(
-                    status_code=500, detail=f"Status ID {status_id} não encontrado."
-                )
-            return TriggerResponse(
-                trigger_id=None,
-                message=f"Extração de {len(raw_material_ids)} URLs concluída. Use o task_id para iniciar a geração de conteúdo.",
-                task_id=task_id,
-                status=status,
-            )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Erro na extração de URLs para task_id {task_id}: {str(e)}")
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-            status_id = db_service.get_status_id_by_name("COLLECTION_FAILED", conn=conn)
-            if not status_id:
-                raise HTTPException(
-                    status_code=500, detail="Status COLLECTION_FAILED não encontrado."
-                )
-            db_service.update_material_status(
-                conn=conn,
-                user_id=user_id,
-                task_id=task_id,
-                new_status_name="COLLECTION_FAILED",
-            )
-        raise HTTPException(status_code=500, detail=f"Erro na extração: {str(e)}")
-
-
-@router.post(
-    "/generate-content",
-    tags=["generate-content"],
-    summary="Gerar conteúdo sob demanda",
-    description="Gera conteúdo com base em um task_id existente, usando materiais brutos salvos no banco e o provedor de IA especificado.",
-)
-async def generate_content(
-    request: GenerateContentRequest,
-    user: dict = Depends(Auth.verify_token),
-):
-    user_id = user.get("sub")
-    task_id = request.task_id
-    theme = request.theme
-    content_type = request.output_format
-    provider_name = request.provider
-
-    try:
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-            material = db_service.get_material(conn, user_id, task_id)
-            if not material or not material.get("raw_material_ids"):
-                raise HTTPException(
-                    status_code=404,
-                    detail="Nenhum material bruto encontrado para o task_id",
-                )
-
-            raw_material_ids = material["raw_material_ids"]
-            if isinstance(raw_material_ids, str):
-                try:
-                    raw_material_ids = json.loads(raw_material_ids)
-                except json.JSONDecodeError:
-                    raw_material_ids = []
-
-            raw_materials_records = db_service.get_raw_materials_by_ids(
-                conn, raw_material_ids
-            )
-
-            raw_materials = [
-                record.get("content", "")
-                for record in raw_materials_records
-                if record.get("content")
-            ]
-
-            if not raw_materials:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Nenhum conteúdo válido encontrado nos raw_material_ids",
-                )
-
-            compiled_raw_material = "\n\n---\n\n".join(raw_materials)[
-                : Config.MAX_TEXT_LEN
-            ]
-
-            status_id = db_service.get_status_id_by_name(
-                "PENDING_GENERATION", conn=conn
-            )
-            if not status_id:
-                raise HTTPException(
-                    status_code=500, detail="Status PENDING_GENERATION não encontrado."
-                )
-
-            db_service.update_material_status(
-                conn=conn,
-                user_id=user_id,
-                task_id=task_id,
-                new_status_name="PENDING_GENERATION",
-            )
-
-            generated_data = await generate_content_with_provider_service(
-                provider_name=provider_name,
-                theme=theme,
-                raw_material=compiled_raw_material,
-                content_type=content_type,
-            )
-
-            status_id = db_service.get_status_id_by_name("GENERATED", conn=conn)
-            if not status_id:
-                raise HTTPException(
-                    status_code=500, detail="Status GENERATED não encontrado."
-                )
-            db_service.save_material(
-                user_id=user_id,
-                automation_request_id=material.get("automation_request_id"),
-                task_id=task_id,
-                status_id=status_id,
-                theme=theme,
-                content_type=content_type,
-                generated_content=json.dumps(generated_data, ensure_ascii=False),
-                suggested_image_prompt=generated_data.get("suggested_image_prompt"),
-                conn=conn,
-            )
-
-            logger.info(
-                f"Conteúdo gerado sob demanda para task_id {task_id} com sucesso. Provedor: {provider_name}"
-            )
-
-            status = db_service.get_status_by_id(status_id, conn=conn)
-            if not status:
-                raise HTTPException(
-                    status_code=500, detail=f"Status ID {status_id} não encontrado."
-                )
-            return {
-                "message": "Conteúdo gerado com sucesso!",
-                "task_id": task_id,
-                "status": status,
-                "generated_content": generated_data,
-            }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(
-            f"Erro na geração de conteúdo sob demanda para task_id {task_id}: {str(e)}",
-            exc_info=True,
-        )
-        try:
-            async with AsyncDatabaseManager(DB_FILE) as conn:
-                status_id = db_service.get_status_id_by_name(
-                    "FAILED_GENERATION", conn=conn
-                )
-                if not status_id:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Status FAILED_GENERATION não encontrado.",
-                    )
-
-                db_service.update_material_status(
-                    conn=conn,
-                    user_id=user_id,
-                    task_id=task_id,
-                    new_status_name="FAILED_GENERATION",
-                )
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"Erro na geração: {str(e)}")
-
-
 @router.get(
     "/raw-material/{raw_material_id}",
     tags=["Automação"],
@@ -1317,182 +986,6 @@ THEME_SCHEMA = {
     },
     "required": ["theme"],
 }
-
-
-@router.post(
-    "/trigger-by-text",
-    tags=["trigger-automation"],
-    summary="Inicia automação a partir de um texto",
-    description="Recebe um texto, extrai o tema e gera fatores de busca via IA, salvando apenas em automation_configs.",
-    status_code=200,
-)
-async def trigger_by_text(
-    request: TriggerByTextRequest,
-    current_user: dict = Depends(Auth.verify_token),
-):
-    """
-    Recebe um texto, utiliza IA para extrair tema e fatores de busca aprimorados,
-    e salva a configuração no DB para acionamento posterior via /trigger-by-id.
-    """
-    user_id = current_user.get("sub")
-    task_id = str(uuid.uuid4())
-    provider_name = request.provider
-
-    # 1️⃣ Geração via IA
-    try:
-        provider = get_provider_instance(provider_name)
-        MAX_AI_INPUT_CHARS = 10000
-
-        prompt = f"""
-        Analise o seguinte texto: '{request.textContent[:MAX_AI_INPUT_CHARS]}'.
-        Gere um objeto JSON com o seguinte formato:
-        {{
-            "theme": "tema principal do texto",
-            "search_factors": ["lista de palavras-chave e expressões relevantes para busca"]
-        }}
-        Responda APENAS com o JSON.
-        """
-
-        ai_response: Dict[str, Any] = await provider.generate_content(
-            prompt=prompt,
-            response_schema=AI_RESPONSE_SCHEMA_CONFIG,
-        )
-
-        theme = ai_response.get("theme")
-        search_factors = ai_response.get("search_factors")
-
-        if not theme or not search_factors:
-            raise ValueError(
-                "A IA não retornou o tema e/ou os fatores de busca esperados."
-            )
-
-    except Exception as e:
-        logger.error(f"Erro na extração de tema/fatores de busca: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Falha na análise de IA: {str(e)}")
-
-    try:
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-
-            # status_id = db_service.get_status_id_by_name(conn, "PENDING_COLLECTION")
-            status_id = db_service.get_status_id_by_name(
-                "PENDING_COLLECTION", conn=conn
-            )
-
-            if not status_id:
-                raise ValueError(
-                    "Status 'PENDING_COLLECTION' não encontrado no banco de dados."
-                )
-
-            full_config_data = {
-                "theme": theme,
-                "content_type": request.content_type,
-                "search_factors": search_factors,
-                "source_urls": [],
-                "scraping_log": {},
-            }
-
-            db_service.save_automation_config(
-                conn=conn,
-                task_id=task_id,
-                status_id=status_id,
-                search_factors=full_config_data,
-            )
-
-        return TriggerByTextResponse(
-            task_id=task_id,
-            theme=theme,
-            status="PENDING_COLLECTION",
-        )
-
-    except Exception as e:
-        logger.error(f"Erro ao salvar automação no DB para task_id {task_id}: {str(e)}")
-        raise HTTPException(
-            status_code=500, detail=f"Falha ao persistir a automação: {str(e)}"
-        )
-
-
-@router.get(
-    "/trigger-by-id/{id}",
-    response_model=TriggerResponse,
-    tags=["trigger-automation"],
-    summary="Aciona automação por ID",
-    description="Inicia a coleta de material bruto com base no ID existente em automation_configs.",
-)
-async def trigger_by_id(
-    id: str,
-    background_tasks: BackgroundTasks,
-    current_user: dict = Depends(Auth.verify_token),
-):
-    """
-    Aciona a automação de coleta de material bruto com base nas palavras-chave
-    previamente geradas e armazenadas em automation_configs.
-    """
-    user_id = current_user.get("sub")
-    task_id = id
-
-    try:
-        async with AsyncDatabaseManager(DB_FILE) as conn:
-            # 1️⃣ Busca configuração da automação
-            config_row = db_service.get_automation_config(conn, task_id)
-            if not config_row:
-                raise HTTPException(
-                    status_code=404, detail=f"Automação '{task_id}' não encontrada."
-                )
-
-            try:
-                config_data = json.loads(config_row["search_factors"])
-            except json.JSONDecodeError:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Erro ao interpretar automation_configs JSON.",
-                )
-
-            search_factors = config_data.get("search_factors")
-            if not search_factors:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Nenhum fator de busca encontrado para essa automação.",
-                )
-
-            # 2️⃣ Busca URLs com base nos search_factors
-            urls = await search_urls_from_keywords(
-                search_factors
-            )  # Função no automation_service.py
-
-            # 3️⃣ Salva URLs obtidas e inicializa log
-            config_data["source_urls"] = urls
-            config_data["scraping_log"] = {url: "pending" for url in urls}
-            db_service.update_automation_config(conn, task_id, json.dumps(config_data))
-
-            # 4️⃣ Dispara scraping (usa a mesma lógica de trigger-multiple-urls)
-            background_tasks.add_task(
-                run_automation,
-                task_id=task_id,
-                user_id=user_id,
-                theme=config_data.get("theme"),
-                content_type=config_data.get("content_type"),
-                search_factors=json.dumps(search_factors),
-                source_urls=urls,
-                return_raw_material_only=True,
-                auth_headers={"Authorization": f"Bearer {current_user.get('token')}"},
-            )
-
-            db_service.update_task_status(conn, task_id, "COLLECTION_INITIATED")
-
-        return JSONResponse(
-            status_code=202,
-            content={
-                "task_id": task_id,
-                "status": "COLLECTION_INITIATED",
-                "message": f"Busca iniciada com {len(urls)} URLs encontradas. Scraping será executado em segundo plano.",
-            },
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Erro ao acionar automação (task_id={task_id}): {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 
 @router.post(
@@ -1571,9 +1064,7 @@ async def trigger_automation_post(
         if Config.LOGS_API_URL:
             log_data = {
                 "action": f"Falha de validação Pydantic para POST /trigger. Erro: {str(e)}",
-                "timestamp": datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", ""),
+                "timestamp": datetime.now(timezone.utc).replace("+00:00", ""),
                 "level": "ERROR",
                 "report_id": task_id,
             }
@@ -1600,9 +1091,7 @@ async def trigger_automation_post(
         if Config.LOGS_API_URL:
             log_data = {
                 "action": f"Falha na automação POST /trigger. Erro: {http_exc.detail}",
-                "timestamp": datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", ""),
+                "timestamp": datetime.now(timezone.utc).replace("+00:00", ""),
                 "level": "ERROR",
                 "report_id": task_id,
             }
@@ -1626,9 +1115,7 @@ async def trigger_automation_post(
         if Config.LOGS_API_URL:
             log_data = {
                 "action": f"Erro inesperado na automação POST /trigger. Erro: {str(e)}",
-                "timestamp": datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", ""),
+                "timestamp": datetime.now(timezone.utc).replace("+00:00", ""),
                 "level": "CRITICAL",
                 "report_id": task_id,
             }
@@ -1664,7 +1151,7 @@ def list_posts():
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM materials ORDER BY created_at DESC")
+        cursor.execute("SELECT * FROM tbl_materials ORDER BY created_at DESC")
         materials = cursor.fetchall()
 
         posts = []
@@ -1719,7 +1206,7 @@ def get_post_by_id(task_id: str):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM materials WHERE task_id = ?", (task_id,))
+        cursor.execute("SELECT * FROM tbl_materials WHERE task_id = ?", (task_id,))
         material = cursor.fetchone()
 
         if not material:
@@ -1832,7 +1319,7 @@ class AutomationConfigResponse(BaseModel):
 
 
 @router.get(
-    "/automation_configs/list_all",
+    "/tbl_automation_configs/list_all",
     response_model=List[AutomationConfigResponse],
     summary="Lista todas as configurações de automação.",
     description="Retorna uma lista de todas as configurações, permitindo filtrar pelo ID do status da tarefa (opcional).",
@@ -1874,3 +1361,592 @@ async def list_all_automation_configs(
         raise HTTPException(
             status_code=500, detail=f"Erro interno do servidor: {str(e)}"
         )
+
+
+@router.post(
+    "/generate-content-manual",
+    tags=["generate-content"],
+    summary="Gerar conteúdo manualmente",
+    description="Gera conteúdo com base em material bruto fornecido manualmente, usando o provedor de IA especificado.",
+)
+async def generate_content_manual(
+    request: GenerateContentManualRequest,
+    user: dict = Depends(Auth.verify_token),
+):
+    user_id = user.get("sub")
+    task_id = request.task_id
+    provider_name = request.provider
+
+    try:
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            generated_data = await generate_content_with_provider_service(
+                provider_name=provider_name,
+                theme=request.theme,
+                raw_material=request.raw_material[: Config.MAX_TEXT_LEN],
+                content_type=request.content_type,
+            )
+
+            status_id = db_service.get_status_id_by_name("GENERATED", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status GENERATED não encontrado."
+                )
+
+            db_service.save_material(
+                user_id=user_id,
+                automation_request_id=None,
+                task_id=task_id,
+                status_id=status_id,
+                theme=request.theme,
+                content_type=request.content_type,
+                raw_material=request.raw_material,
+                generated_content=json.dumps(generated_data, ensure_ascii=False),
+                suggested_image_prompt=generated_data.get("suggested_image_prompt"),
+                conn=conn,
+            )
+
+            logger.info(f"Task {task_id} de geração manual salva no DB com sucesso.")
+
+            status = db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                raise HTTPException(
+                    status_code=500, detail=f"Status ID {status_id} não encontrado."
+                )
+            return {
+                "message": "Conteúdo gerado com sucesso!",
+                "task_id": task_id,
+                "status": status,
+                "generated_content": generated_data,
+            }
+    except Exception as e:
+        logger.error(
+            f"Erro na geração manual de conteúdo para task_id {task_id} (Provedor: {provider_name}): {str(e)}"
+        )
+        async with AsyncDatabaseManager(DB_FILE) as conn:
+            status_id = db_service.get_status_id_by_name("FAILED_GENERATION", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status FAILED_GENERATION não encontrado."
+                )
+
+            db_service.update_material_status(
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status_name="FAILED_GENERATION",
+            )
+        raise HTTPException(status_code=500, detail=f"Erro na geração: {str(e)}")
+
+
+################################# REFATORADO E TESTADO #################################
+@router.post(
+    "/trigger-by-text",
+    tags=["trigger-automation"],
+    summary="Inicia automação a partir de um texto",
+    description="Recebe um texto, extrai o tema e gera fatores de busca via IA, salvando em tbl_automation_configs.",
+    status_code=200,
+)
+async def trigger_by_text(
+    request: TriggerByTextRequest,
+    current_user: dict = Depends(Auth.verify_token),
+):
+    user_id = current_user.get("sub")
+    task_id = str(uuid.uuid4())
+    provider_name = request.provider
+
+    # 1. Geração via IA
+    try:
+        provider = get_provider_instance(provider_name)
+        MAX_AI_INPUT_CHARS = 10000
+
+        prompt = f"""
+        Analise o seguinte texto: '{request.textContent[:MAX_AI_INPUT_CHARS]}'.
+        Gere um objeto JSON com o seguinte formato:
+        {{
+            "theme": "tema principal do texto",
+            "search_factors": ["lista de palavras-chave e expressões relevantes para busca"]
+        }}
+        Responda APENAS com o JSON.
+        """
+
+        ai_response: Dict[str, Any] = await provider.generate_content(
+            prompt=prompt,
+            response_schema=AI_RESPONSE_SCHEMA_CONFIG,
+        )
+
+        theme = ai_response.get("theme")
+        search_factors = ai_response.get("search_factors")
+
+        if not theme or not search_factors:
+            raise ValueError(
+                "A IA não retornou o tema e/ou os fatores de busca esperados."
+            )
+
+    except Exception as e:
+        logger.error(f"Erro na extração de tema/fatores de busca: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Falha na análise de IA: {str(e)}")
+
+    # 2. Salvar no PostgreSQL
+    full_config_data = {
+        "theme": theme,
+        "content_type": request.content_type,
+        "search_factors": search_factors,
+        "source_urls": [],
+        "scraping_log": {},
+    }
+
+    async with AsyncPostgresManager() as conn:
+        async with conn.transaction():
+            try:
+                status_id = await conn.fetchval(
+                    "SELECT id FROM tbl_status WHERE name = $1", "PENDING_COLLECTION"
+                )
+                if not status_id:
+                    raise ValueError("Status 'PENDING_COLLECTION' não encontrado.")
+
+                now = datetime.now()  # timezone-naive (PostgreSQL aceita)
+
+                await conn.execute(
+                    """
+                    INSERT INTO tbl_automation_configs (task_id, status_id, search_factors, created_at)
+                    VALUES ($1, $2, $3::jsonb, $4)
+                    ON CONFLICT (task_id) DO UPDATE SET
+                        status_id = EXCLUDED.status_id,
+                        search_factors = EXCLUDED.search_factors,
+                        created_at = EXCLUDED.created_at
+                    """,
+                    task_id,
+                    status_id,
+                    json.dumps(full_config_data),
+                    now,
+                )
+
+                return TriggerByTextResponse(
+                    task_id=task_id,
+                    theme=theme,
+                    status="PENDING_COLLECTION",
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"Erro ao salvar automação no DB para task_id {task_id}: {str(e)}"
+                )
+                raise HTTPException(
+                    status_code=500, detail=f"Falha ao persistir a automação: {str(e)}"
+                )
+
+
+@router.post(
+    "/trigger-multiple-urls",
+    response_model=TriggerResponse,
+    tags=["trigger-automation"],
+    summary="Acionar scraping por várias URLs",
+    description="Extrai conteúdo de várias URLs, salva os materiais brutos e retorna o task_id.",
+)
+async def trigger_multiple_urls(
+    request: ExtractFromUrlsRequest,
+    user: dict = Depends(Auth.verify_token),
+):
+    task_id = str(uuid.uuid4())
+    user_id = user.get("sub")
+    raw_material_ids = []
+
+    async with AsyncPostgresManager() as conn:
+        async with conn.transaction():
+            try:
+                # 1️⃣ Busca o status "PENDING_COLLECTION"
+                status_id = await conn.fetchval(
+                    "SELECT id FROM tbl_status WHERE name = $1",
+                    "PENDING_COLLECTION",
+                )
+                if not status_id:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Status PENDING_COLLECTION não encontrado.",
+                    )
+
+                # 2️⃣ Salva material inicial
+                now = datetime.now()
+                source_urls_list = [str(url) for url in request.urls]
+
+                existing = await conn.fetchrow(
+                    "SELECT * FROM tbl_materials WHERE task_id = $1", task_id
+                )
+                if existing:
+                    await conn.execute(
+                        """
+                        UPDATE tbl_materials
+                        SET status_id = $1, source_urls = $2, updated_at = $3
+                        WHERE task_id = $4
+                        """,
+                        status_id,
+                        json.dumps(source_urls_list),  # ✅ serializa manualmente
+                        now,
+                        task_id,
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        INSERT INTO tbl_materials (
+                            task_id, user_id, status_id, source_urls, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6)
+                        """,
+                        task_id,
+                        user_id,
+                        status_id,
+                        json.dumps(source_urls_list),  # ✅ serializa manualmente
+                        now,
+                        now,
+                    )
+
+                # 3️⃣ Processa cada URL
+                for url in request.urls:
+                    url_str = str(url)
+                    content = await fetch_url_content(url_str)
+                    if not content:
+                        logger.warning(f"Nenhum conteúdo retornado para: {url_str}")
+                        continue
+
+                    cleaned_content = clean_html_content(content)
+                    if cleaned_content:
+                        raw_id = await db_service.save_raw_material(
+                            conn, user_id, task_id, url_str, cleaned_content
+                        )
+                        raw_material_ids.append(raw_id)
+
+                # 4️⃣ Nenhum material extraído
+                if not raw_material_ids:
+                    failed_status_id = await conn.fetchval(
+                        "SELECT id FROM tbl_status WHERE name = $1", "COLLECTION_FAILED"
+                    )
+                    if failed_status_id:
+                        await conn.execute(
+                            "UPDATE tbl_materials SET status_id = $1, updated_at = $2 WHERE task_id = $3",
+                            failed_status_id,
+                            now,
+                            task_id,
+                        )
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Nenhum conteúdo extraído das URLs fornecidas",
+                    )
+
+                # 5️⃣ Atualiza com sucesso
+                await conn.execute(
+                    "UPDATE tbl_materials SET raw_material_ids = $1, updated_at = $2 WHERE task_id = $3",
+                    json.dumps(raw_material_ids),  # ✅ serializa manualmente
+                    now,
+                    task_id,
+                )
+
+                collected_status_id = await conn.fetchval(
+                    "SELECT id FROM tbl_status WHERE name = $1", "RAW_COLLECTED"
+                )
+                if collected_status_id:
+                    await conn.execute(
+                        "UPDATE tbl_materials SET status_id = $1, updated_at = $2 WHERE task_id = $3",
+                        collected_status_id,
+                        now,
+                        task_id,
+                    )
+
+                # 6️⃣ Resposta final
+                status_row = await conn.fetchrow(
+                    "SELECT id, name, display_name, bg_class, text_class FROM tbl_status WHERE id = $1",
+                    collected_status_id,
+                )
+                status = dict(status_row) if status_row else None
+
+                if not status:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Status RAW_COLLECTED não encontrado.",
+                    )
+
+                return TriggerResponse(
+                    trigger_id=None,
+                    message=f"Extração de {len(raw_material_ids)} URLs concluída com sucesso.",
+                    task_id=task_id,
+                    status=status,
+                )
+
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Erro na extração de URLs (task_id {task_id}): {e}")
+                raise HTTPException(
+                    status_code=500, detail=f"Erro na extração: {str(e)}"
+                )
+
+
+@router.post(
+    "/generate-content",
+    tags=["generate-content"],
+    summary="Gerar conteúdo sob demanda",
+    description="Gera conteúdo com base em um task_id existente, usando materiais brutos salvos no banco e o provedor de IA especificado.",
+)
+async def generate_content(
+    request: GenerateContentRequest,
+    user: dict = Depends(Auth.verify_token),
+):
+    user_id = user.get("sub")
+    task_id = request.task_id
+    theme = request.theme
+    content_type = request.output_format
+    provider_name = request.provider
+
+    try:
+        async with AsyncPostgresManager() as conn:  # <-- Postgres
+            material = await db_service.get_material(conn, user_id, task_id)
+            if not material or not material.get("raw_material_ids"):
+                raise HTTPException(
+                    status_code=404,
+                    detail="Nenhum material bruto encontrado para o task_id",
+                )
+
+            raw_material_ids = material["raw_material_ids"]
+            if isinstance(raw_material_ids, str):
+                try:
+                    raw_material_ids = json.loads(raw_material_ids)
+                except json.JSONDecodeError:
+                    raw_material_ids = []
+
+            raw_materials_records = await db_service.get_raw_materials_by_ids(
+                conn, raw_material_ids
+            )
+
+            raw_materials = [
+                record.get("content", "")
+                for record in raw_materials_records
+                if record.get("content")
+            ]
+
+            if not raw_materials:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Nenhum conteúdo válido encontrado nos raw_material_ids",
+                )
+
+            compiled_raw_material = "\n\n---\n\n".join(raw_materials)[
+                : Config.MAX_TEXT_LEN
+            ]
+
+            status_id = await db_service.get_status_id_by_name(
+                "PENDING_GENERATION", conn=conn
+            )
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status PENDING_GENERATION não encontrado."
+                )
+
+            await db_service.update_material_status(
+                conn=conn,
+                user_id=user_id,
+                task_id=task_id,
+                new_status_name="PENDING_GENERATION",
+            )
+
+            generated_data = await generate_content_with_provider_service(
+                provider_name=provider_name,
+                theme=theme,
+                raw_material=compiled_raw_material,
+                content_type=content_type,
+            )
+            status_id = await db_service.get_status_id_by_name("GENERATED", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status GENERATED não encontrado."
+                )
+
+            # --- Geração do conteúdo pela IA ---
+            generated_data = await generate_content_with_provider_service(
+                provider_name=provider_name,
+                theme=theme,
+                raw_material=compiled_raw_material,
+                content_type=content_type,
+            )
+
+            status_id = await db_service.get_status_id_by_name("PENDING", conn=conn)
+
+            # inserir dado do banco ou status 1
+            generated_data["status_id"] = status_id
+            generated_data["category_id"] = 1
+            # --- 1. Salvar em tbl_post e obter post_id ---
+            post_id = await db_service.save_post(conn, generated_data)
+
+            # --- 2. Atualizar tbl_materials com post_id e status GENERATED ---
+            status_id = await db_service.get_status_id_by_name("GENERATED", conn=conn)
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status GENERATED não encontrado."
+                )
+
+            await db_service.save_material(
+                conn=conn,
+                user_id=user_id,
+                automation_request_id=material.get("automation_request_id"),
+                task_id=task_id,
+                status_id=status_id,
+                theme=theme,
+                content_type=content_type,
+                suggested_image_prompt=generated_data.get(
+                    "image"
+                ),  # ou .get("suggested_image_prompt") se existir
+                post_id=post_id,
+                source_urls=material.get(
+                    "source_urls"
+                ),  # opcional: manter ou atualizar
+            )
+
+            # --- Log de sucesso ---
+            logger.info(
+                f"Conteúdo gerado e salvo com post_id {post_id} para task_id {task_id}. Provedor: {provider_name}"
+            )
+
+            status = await db_service.get_status_by_id(status_id, conn=conn)
+            if not status:
+                raise HTTPException(
+                    status_code=500, detail=f"Status ID {status_id} não encontrado."
+                )
+            return {
+                "message": "Conteúdo gerado com sucesso!",
+                "task_id": task_id,
+                "status": status,
+                "generated_content": generated_data,
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Erro na geração de conteúdo sob demanda para task_id {task_id}: {str(e)}",
+            exc_info=True,
+        )
+        try:
+            async with AsyncPostgresManager() as conn:  # <-- Postgres no erro
+                status_id = await db_service.get_status_id_by_name(
+                    "FAILED_GENERATION", conn=conn
+                )
+                if not status_id:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Status FAILED_GENERATION não encontrado.",
+                    )
+
+                await db_service.update_material_status(
+                    conn=conn,
+                    user_id=user_id,
+                    task_id=task_id,
+                    new_status_name="FAILED_GENERATION",
+                )
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Erro na geração: {str(e)}")
+
+
+@router.get(
+    "/trigger-by-task-id/{task_id}",
+    response_model=TriggerResponse,
+    tags=["trigger-automation"],
+    summary="Aciona automação por ID",
+    description="Inicia a coleta de material bruto com base no ID existente em tbl_automation_configs.",
+)
+async def trigger_by_task_id(
+    task_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(Auth.verify_token),
+):
+    task_id = task_id
+    user_id = current_user.get("sub")
+
+    try:
+        async with AsyncPostgresManager() as conn:
+            # 1. Busca configuração (JSONB)
+            config_row = await conn.fetchrow(
+                "SELECT search_factors FROM tbl_automation_configs WHERE task_id = $1",
+                task_id,
+            )
+            if not config_row:
+                raise HTTPException(
+                    status_code=404, detail=f"Automação '{task_id}' não encontrada."
+                )
+
+            config_json_str = config_row["search_factors"]
+            if not config_json_str:
+                raise HTTPException(status_code=400, detail="search_factors vazio.")
+
+            # CORREÇÃO: parseia JSON string
+            try:
+                config_data = json.loads(config_json_str)
+            except json.JSONDecodeError as e:
+                raise HTTPException(
+                    status_code=500, detail=f"JSON inválido em search_factors: {e}"
+                )
+
+            theme = config_data.get("theme")
+            content_type = config_data.get("content_type")
+            search_factors = config_data.get("search_factors")
+
+            if not all([theme, content_type, search_factors]):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Faltam theme, content_type ou search_factors.",
+                )
+
+            # 2. Cria/Atualiza material
+            status_id = await conn.fetchval(
+                "SELECT id FROM tbl_status WHERE name = $1", "PENDING_COLLECTION"
+            )
+            if not status_id:
+                raise HTTPException(
+                    status_code=500, detail="Status PENDING_COLLECTION não encontrado."
+                )
+
+            now = datetime.now()
+            await conn.execute(
+                """
+                INSERT INTO tbl_materials (task_id, user_id, status_id, theme, content_type, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (task_id) DO UPDATE SET
+                    status_id = EXCLUDED.status_id,
+                    theme = EXCLUDED.theme,
+                    content_type = EXCLUDED.content_type,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                task_id,
+                user_id,
+                status_id,
+                theme,
+                content_type,
+                now,
+                now,
+            )
+
+            # 3. Dispara automação em background
+            background_tasks.add_task(
+                run_automation,
+                task_id=task_id,
+                user_id=user_id,
+                theme=theme,
+                content_type=content_type,
+                search_factors=json.dumps(search_factors),
+                return_raw_material_only=True,
+                auth_headers={"Authorization": f"Bearer {current_user.get('token')}"},
+            )
+
+            # 4. Retorna status
+            status_row = await conn.fetchrow(
+                "SELECT id, name, display_name, bg_class, text_class FROM tbl_status WHERE id = $1",
+                status_id,
+            )
+            status = dict(status_row)
+
+            return TriggerResponse(
+                message="Coleta iniciada em background.", task_id=task_id, status=status
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro em trigger-by-id {task_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

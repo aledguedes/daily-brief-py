@@ -59,7 +59,7 @@ class PostRequestDTO(BaseModel):
     image: Optional[str] = None
     author: Optional[str] = None
     tags: Optional[List[str]] = None
-    category: Optional[str] = None
+    category_id: Optional[str] = None
     metaDescription: Dict[str, str]
     affiliateLinks: Optional[Dict[str, str]] = None
     status: Optional[str] = None

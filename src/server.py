@@ -98,22 +98,6 @@ class TriggerResponse(BaseModel):
     status: str
 
 
-@app.on_event("startup")
-async def startup_event():
-    """
-    Inicializa o banco de dados SQLite no startup.
-    """
-    logger.info("Inicializando banco de dados SQLite...")
-    try:
-        db_service.init_db()
-        logger.info("Banco de dados SQLite inicializado com sucesso.")
-    except Exception as e:
-        logger.critical(
-            f"Erro ao inicializar o banco de dados SQLite: {e}", exc_info=True
-        )
-        raise
-
-
 @app.get(
     "/test-ok",
     tags=["Teste"],
