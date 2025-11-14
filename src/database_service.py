@@ -105,20 +105,21 @@ async def save_raw_material(
     user_id: str,
     task_id: str,
     url: str,
-    content: str,
+    content: Optional[str],
+    raw_material_id: str,
 ) -> str:
-    raw_material_id = str(uuid.uuid4())
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     await conn.execute(
         """
-        INSERT INTO tbl_raw_materials (id, user_id, task_id, url, content, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO tbl_raw_materials (id, user_id, task_id, url, content, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         """,
         raw_material_id,
         user_id,
         task_id,
         url,
         content,
+        now,
         now,
     )
     logger.info(f"Material bruto salvo com ID: {raw_material_id}")
@@ -204,48 +205,42 @@ async def save_material(
     content_type: Optional[str] = None,
     suggested_image_prompt: Optional[str] = None,
     post_id: Optional[str] = None,
-    source_urls: Optional[List[str]] = None,
 ):
     """
     Atualiza ou insere registro em `tbl_materials` com `post_id` e status.
-    Não salva mais `generated_content`.
+    Não salva mais 'raw_material_ids' nem 'source_urls'.
     """
     await conn.execute("SET TIME ZONE 'UTC';")
     now = datetime.now(timezone.utc)
 
-    # Verifica se já existe
     existing = await conn.fetchrow(
-        "SELECT post_id, source_urls FROM tbl_materials WHERE task_id = $1", task_id
+        "SELECT post_id FROM tbl_materials WHERE task_id = $1", task_id
     )
 
     if existing:
-        # Atualiza apenas o necessário
         await conn.execute(
             """
             UPDATE tbl_materials
             SET status_id = $1, theme = $2, content_type = $3,
                 suggested_image_prompt = $4, post_id = $5,
-                source_urls = $6, updated_at = $7
-            WHERE task_id = $8
+                updated_at = $6
+            WHERE task_id = $7
             """,
             status_id,
             theme,
             content_type,
             suggested_image_prompt,
             post_id,
-            source_urls or existing["source_urls"],
             now,
             task_id,
         )
     else:
-        # Insere novo
         await conn.execute(
             """
             INSERT INTO tbl_materials (
                 user_id, automation_request_id, task_id, status_id, theme, content_type,
-                raw_material_ids, suggested_image_prompt, post_id, source_urls,
-                created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                suggested_image_prompt, post_id, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
             user_id,
             automation_request_id,
@@ -253,10 +248,8 @@ async def save_material(
             status_id,
             theme,
             content_type,
-            [],
             suggested_image_prompt,
             post_id,
-            source_urls or [],
             now,
             now,
         )
@@ -655,3 +648,93 @@ async def get_raw_materials_by_ids(
     except Exception as e:
         logger.error(f"Erro ao buscar materiais brutos: {str(e)}")
         return []
+
+
+async def save_material_source(
+    conn: asyncpg.Connection,
+    task_id: str,
+    url: str,
+    status: str,
+    raw_material_id: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+
+    await conn.execute(
+        """
+        INSERT INTO tbl_material_source (
+            id, task_id, url, status, raw_material_id, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """,
+        uuid.uuid4(),
+        uuid.UUID(task_id),
+        url,
+        status,
+        uuid.UUID(raw_material_id),
+        now,
+        now,
+    )
+
+
+async def save_material_source(
+    conn: asyncpg.Connection,
+    task_id: str,
+    url: str,
+    status: str,  # 'SUCCESS' ou 'FAILED'
+    raw_material_id: str,  # AGORA OBRIGATÓRIO
+) -> None:
+    now = datetime.now(timezone.utc)
+
+    await conn.execute(
+        """
+        INSERT INTO tbl_material_source (
+            id, task_id, url, status, raw_material_id, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """,
+        str(uuid.uuid4()),
+        task_id,
+        url,
+        status,
+        raw_material_id,
+        now,
+        now,
+    )
+
+
+async def get_successful_raw_material_ids(
+    conn: asyncpg.Connection, task_id: str
+) -> List[str]:
+    """Busca todos os raw_material_id (de coletas bem-sucedidas) de tbl_material_source."""
+    rows = await conn.fetch(
+        """
+        SELECT raw_material_id 
+        FROM tbl_material_source 
+        WHERE task_id = $1 AND status = 'SUCCESS' AND raw_material_id IS NOT NULL
+        """,
+        task_id,
+    )
+    return [str(row["raw_material_id"]) for row in rows if row["raw_material_id"]]
+
+
+async def get_material_sources(
+    conn: asyncpg.Connection, task_id: str
+) -> List[Dict[str, Any]]:
+    """Busca todos os logs de coleta (sucesso e falha) para um task_id específico."""
+    rows = await conn.fetch(
+        """
+        SELECT id, url, status, raw_material_id, created_at
+        FROM tbl_material_source
+        WHERE task_id = $1
+        ORDER BY created_at
+        """,
+        task_id,  # task_id passado como STRING, conforme correção de tipos
+    )
+    return [
+        {
+            "id": str(row["id"]),
+            "url": row["url"],
+            "status": row["status"],
+            "rawId": str(row["raw_material_id"]),
+            "created_at": row["created_at"].isoformat(),
+        }
+        for row in rows
+    ]

@@ -97,11 +97,20 @@ class MaterialResponse(BaseModel):
     updated_at: str
 
 
+class SourceMaterialLog(BaseModel):
+    id: str
+    url: str
+    status: str
+    rawId: Optional[str] = None
+    created_at: str
+
+
 class TriggerResponse(BaseModel):
     trigger_id: Optional[str] = None
     message: str
     task_id: str
     status: StatusResponse
+    source_materials: List[SourceMaterialLog]
 
 
 # Modelos Pydantic
@@ -1549,12 +1558,11 @@ async def trigger_multiple_urls(
 ):
     task_id = str(uuid.uuid4())
     user_id = user.get("sub")
-    raw_material_ids = []
+    successful_collection_count = 0
 
     async with AsyncPostgresManager() as conn:
         async with conn.transaction():
             try:
-                # 1️⃣ Busca o status "PENDING_COLLECTION"
                 status_id = await conn.fetchval(
                     "SELECT id FROM tbl_status WHERE name = $1",
                     "PENDING_COLLECTION",
@@ -1565,9 +1573,7 @@ async def trigger_multiple_urls(
                         detail="Status PENDING_COLLECTION não encontrado.",
                     )
 
-                # 2️⃣ Salva material inicial
                 now = datetime.now()
-                source_urls_list = [str(url) for url in request.urls]
 
                 existing = await conn.fetchrow(
                     "SELECT * FROM tbl_materials WHERE task_id = $1", task_id
@@ -1576,11 +1582,10 @@ async def trigger_multiple_urls(
                     await conn.execute(
                         """
                         UPDATE tbl_materials
-                        SET status_id = $1, source_urls = $2, updated_at = $3
-                        WHERE task_id = $4
+                        SET status_id = $1, updated_at = $2
+                        WHERE task_id = $3
                         """,
                         status_id,
-                        json.dumps(source_urls_list),  # ✅ serializa manualmente
                         now,
                         task_id,
                     )
@@ -1588,34 +1593,53 @@ async def trigger_multiple_urls(
                     await conn.execute(
                         """
                         INSERT INTO tbl_materials (
-                            task_id, user_id, status_id, source_urls, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6)
+                            task_id, user_id, status_id, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5)
                         """,
                         task_id,
                         user_id,
                         status_id,
-                        json.dumps(source_urls_list),  # ✅ serializa manualmente
                         now,
                         now,
                     )
 
-                # 3️⃣ Processa cada URL
                 for url in request.urls:
                     url_str = str(url)
-                    content = await fetch_url_content(url_str)
-                    if not content:
-                        logger.warning(f"Nenhum conteúdo retornado para: {url_str}")
-                        continue
 
-                    cleaned_content = clean_html_content(content)
-                    if cleaned_content:
-                        raw_id = await db_service.save_raw_material(
-                            conn, user_id, task_id, url_str, cleaned_content
-                        )
-                        raw_material_ids.append(raw_id)
+                    raw_id = str(uuid.uuid4())
 
-                # 4️⃣ Nenhum material extraído
-                if not raw_material_ids:
+                    content_to_save = None
+                    final_status = "FAILED"
+
+                    try:
+                        content = await fetch_url_content(url_str)
+                        cleaned_content = clean_html_content(content)
+
+                        if cleaned_content:
+                            content_to_save = cleaned_content
+                            final_status = "SUCCESS"
+                            successful_collection_count += 1
+                        else:
+                            logger.warning(
+                                f"Nenhum conteúdo limpo retornado para: {url_str}"
+                            )
+
+                    except Exception as e:
+                        logger.error(f"Erro ao processar URL {url_str}: {e}")
+
+                    await db_service.save_raw_material(
+                        conn, user_id, task_id, url_str, content_to_save, raw_id
+                    )
+
+                    await db_service.save_material_source(
+                        conn,
+                        task_id,
+                        url_str,
+                        final_status,
+                        raw_material_id=raw_id,
+                    )
+
+                if successful_collection_count == 0:
                     failed_status_id = await conn.fetchval(
                         "SELECT id FROM tbl_status WHERE name = $1", "COLLECTION_FAILED"
                     )
@@ -1631,14 +1655,6 @@ async def trigger_multiple_urls(
                         detail="Nenhum conteúdo extraído das URLs fornecidas",
                     )
 
-                # 5️⃣ Atualiza com sucesso
-                await conn.execute(
-                    "UPDATE tbl_materials SET raw_material_ids = $1, updated_at = $2 WHERE task_id = $3",
-                    json.dumps(raw_material_ids),  # ✅ serializa manualmente
-                    now,
-                    task_id,
-                )
-
                 collected_status_id = await conn.fetchval(
                     "SELECT id FROM tbl_status WHERE name = $1", "RAW_COLLECTED"
                 )
@@ -1650,7 +1666,6 @@ async def trigger_multiple_urls(
                         task_id,
                     )
 
-                # 6️⃣ Resposta final
                 status_row = await conn.fetchrow(
                     "SELECT id, name, display_name, bg_class, text_class FROM tbl_status WHERE id = $1",
                     collected_status_id,
@@ -1663,11 +1678,14 @@ async def trigger_multiple_urls(
                         detail="Status RAW_COLLECTED não encontrado.",
                     )
 
+                source_materials = await db_service.get_material_sources(conn, task_id)
+
                 return TriggerResponse(
                     trigger_id=None,
-                    message=f"Extração de {len(raw_material_ids)} URLs concluída com sucesso.",
+                    message=f"Extração de {successful_collection_count} URLs concluída com sucesso. Detalhes em 'source_materials'.",
                     task_id=task_id,
                     status=status,
+                    source_materials=source_materials,
                 )
 
             except HTTPException:
@@ -1696,20 +1714,23 @@ async def generate_content(
     provider_name = request.provider
 
     try:
-        async with AsyncPostgresManager() as conn:  # <-- Postgres
+        async with AsyncPostgresManager() as conn:
+
             material = await db_service.get_material(conn, user_id, task_id)
-            if not material or not material.get("raw_material_ids"):
+            if not material:
                 raise HTTPException(
                     status_code=404,
-                    detail="Nenhum material bruto encontrado para o task_id",
+                    detail="Tarefa ou Material principal não encontrado para o task_id",
                 )
 
-            raw_material_ids = material["raw_material_ids"]
-            if isinstance(raw_material_ids, str):
-                try:
-                    raw_material_ids = json.loads(raw_material_ids)
-                except json.JSONDecodeError:
-                    raw_material_ids = []
+            raw_material_ids: List[str] = (
+                await db_service.get_successful_raw_material_ids(conn, task_id)
+            )
+            if not raw_material_ids:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Nenhum material bruto válido encontrado (status 'SUCCESS' na tabela de fontes)",
+                )
 
             raw_materials_records = await db_service.get_raw_materials_by_ids(
                 conn, raw_material_ids
@@ -1752,29 +1773,14 @@ async def generate_content(
                 raw_material=compiled_raw_material,
                 content_type=content_type,
             )
-            status_id = await db_service.get_status_id_by_name("GENERATED", conn=conn)
-            if not status_id:
-                raise HTTPException(
-                    status_code=500, detail="Status GENERATED não encontrado."
-                )
-
-            # --- Geração do conteúdo pela IA ---
-            generated_data = await generate_content_with_provider_service(
-                provider_name=provider_name,
-                theme=theme,
-                raw_material=compiled_raw_material,
-                content_type=content_type,
-            )
 
             status_id = await db_service.get_status_id_by_name("PENDING", conn=conn)
 
-            # inserir dado do banco ou status 1
             generated_data["status_id"] = status_id
             generated_data["category_id"] = 1
-            # --- 1. Salvar em tbl_post e obter post_id ---
+
             post_id = await db_service.save_post(conn, generated_data)
 
-            # --- 2. Atualizar tbl_materials com post_id e status GENERATED ---
             status_id = await db_service.get_status_id_by_name("GENERATED", conn=conn)
             if not status_id:
                 raise HTTPException(
@@ -1789,16 +1795,10 @@ async def generate_content(
                 status_id=status_id,
                 theme=theme,
                 content_type=content_type,
-                suggested_image_prompt=generated_data.get(
-                    "image"
-                ),  # ou .get("suggested_image_prompt") se existir
+                suggested_image_prompt=generated_data.get("image"),
                 post_id=post_id,
-                source_urls=material.get(
-                    "source_urls"
-                ),  # opcional: manter ou atualizar
             )
 
-            # --- Log de sucesso ---
             logger.info(
                 f"Conteúdo gerado e salvo com post_id {post_id} para task_id {task_id}. Provedor: {provider_name}"
             )
@@ -1808,6 +1808,7 @@ async def generate_content(
                 raise HTTPException(
                     status_code=500, detail=f"Status ID {status_id} não encontrado."
                 )
+
             return {
                 "message": "Conteúdo gerado com sucesso!",
                 "task_id": task_id,
@@ -1823,7 +1824,7 @@ async def generate_content(
             exc_info=True,
         )
         try:
-            async with AsyncPostgresManager() as conn:  # <-- Postgres no erro
+            async with AsyncPostgresManager() as conn:
                 status_id = await db_service.get_status_id_by_name(
                     "FAILED_GENERATION", conn=conn
                 )
